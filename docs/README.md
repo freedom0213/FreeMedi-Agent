@@ -7,6 +7,7 @@
 | 产品 | [项目计划 v2](product/project-plan-v2.md) | 项目范围、业务主线和验收标准 | 当前产品基线 |
 | 产品 | [项目现状文档](product/project-status.md) | 初始规划和讨论记录 | 历史参考 |
 | 架构 | [Agent Runtime v1](architecture/agent-runtime-v1.md) | Agent 执行循环、模块职责、状态和确认门禁 | 当前技术基线 |
+| 架构 | [技术栈决策 v1](architecture/tech-stack-v1.md) | 语言、框架、基础设施和版本基线 | 当前技术基线 |
 | 数据库 | [数据模型 v1](database/data-model-v1.md) | MySQL 实体、约束、事务和 Redis 职责 | 当前逻辑设计 |
 
 ## 目录约定
@@ -22,10 +23,10 @@
 
 项目处于设计完成、尚未开始业务编码阶段。技术基线已经确定：
 
-- Java + Spring Boot + LangChain4j；
-- MySQL 8 作为持久化事实来源；
-- Redis 用于短期任务协调、限流和可重建缓存；
-- Vue 作为前端；
+- Java 17 + Spring Boot 3.4.5 + LangChain4j 0.35.0；
+- MySQL 8.4 作为持久化事实来源；
+- Redis 7.4 用于短期任务协调、限流和可重建缓存；
+- Vue 3.5 + TypeScript + Vite 作为前端；
 - DeepSeek 作为模型服务；
 - Git 仅做本地管理，不配置远程仓库。
 

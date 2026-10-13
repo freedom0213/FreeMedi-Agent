@@ -245,15 +245,15 @@ Spring Boot
 └── audit             工具日志和业务审计
 ```
 
-技术选型：
+技术栈版本和取舍记录在[技术栈决策 v1](../architecture/tech-stack-v1.md)。当前基线为：
 
-- Java + Spring Boot；
-- LangChain4j：模型接入和结构化工具调用；
-- MySQL：业务数据、任务状态和审计的持久化事实来源；
-- Redis：任务短租约、限流和可重建缓存，不作为业务状态唯一存储；
-- Vue：患者端聊天与 Agent 执行轨迹界面；
+- Java 17 + Spring Boot 3.4.5 + Spring MVC；
+- LangChain4j 0.35.0，调用 DeepSeek OpenAI 兼容接口；
+- MySQL 8.4：业务数据、任务状态和审计的持久化事实来源；
+- Redis 7.4：任务短租约、限流和可重建缓存，不作为业务状态唯一存储；
+- Vue 3.5 + TypeScript + Vite；
 - SSE：向前端流式返回 Agent 过程消息；
-- 单体部署：不引入微服务、消息队列和独立向量数据库作为首版前置条件。
+- 模块化单体：不引入微服务、消息队列和独立向量数据库作为首版前置条件。
 
 显式状态机和业务服务负责流程约束，LangChain4j 不负责替代事务、权限和状态管理。
 
