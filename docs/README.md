@@ -21,7 +21,7 @@
 
 ## 当前状态
 
-项目处于设计完成、尚未开始业务编码阶段。技术基线已经确定：
+项目处于后端工程骨架阶段，Agent 和预约业务尚未实现。技术基线已经确定：
 
 - Java 17 + Spring Boot 3.4.5 + LangChain4j 0.35.0；
 - MySQL 8.4 作为持久化事实来源；
@@ -32,11 +32,11 @@
 
 ## 下一步推荐
 
-先初始化 Spring Boot 后端工程，并实现 AgentRuntime 的内存适配器和自动化测试：
+下一步实现 AgentRuntime 的内存适配器和自动化测试：
 
 1. 建立 `agent`、`appointment`、`audit`、`knowledge` 模块目录；
 2. 实现任务状态、决策协议和只读工具执行器；
 3. 用假的模型和模拟号源覆盖追问、工具循环、方案确认门禁和失败终态；
-4. 再接入 MySQL、Redis、DeepSeek 和 Vue 页面。
+4. 验证通过后再接入 MySQL、Redis、DeepSeek 和 Vue 页面。
 
 这样可以先验证 Agent 核心行为，再把基础设施接入，不会让数据库和前端细节掩盖运行时设计问题。
