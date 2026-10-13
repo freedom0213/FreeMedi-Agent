@@ -68,6 +68,50 @@ class AgentRuntimeServiceTest {
     }
 
     @Test
+    void unknownToolProducesControlledFailure() {
+        AgentRuntimeService runtime = runtime(
+                new AgentDecision.CallReadTool(new ToolCall("deleteAppointment", Map.of())));
+
+        AgentTurnResult result = runtime.handleMessage(taskId, OWNER, "删除预约");
+
+        assertEquals(TaskStatus.FAILED, result.status());
+        assertTrue(result.events().stream().anyMatch(event -> "READ_TOOL_FAILED".equals(event.type())));
+    }
+
+    @Test
+    void invalidPlanProducesControlledFailure() {
+        PlanDraft planForAnotherPatient = new PlanDraft(
+                43L, 10L, 20L, 30L, LocalDate.of(2026, 10, 21),
+                "14:00-14:30", Instant.parse("2026-10-13T01:00:00Z"));
+        AgentRuntimeService runtime = runtime(
+                new AgentDecision.ProposePlan(planForAnotherPatient, "请确认预约方案"));
+
+        AgentTurnResult result = runtime.handleMessage(taskId, OWNER, "预约");
+
+        assertEquals(TaskStatus.FAILED, result.status());
+        assertTrue(result.message().contains("方案无效"));
+        assertEquals(0, appointmentService.createdAppointmentCount());
+    }
+
+    @Test
+    void modelExceptionProducesControlledFailure() {
+        AgentRuntimeService runtime = new AgentRuntimeService(
+                stateStore,
+                (context, tools) -> {
+                    throw new IllegalStateException("model unavailable");
+                },
+                new InMemoryReadToolExecutor(),
+                appointmentService,
+                5,
+                CLOCK);
+
+        AgentTurnResult result = runtime.handleMessage(taskId, OWNER, "预约");
+
+        assertEquals(TaskStatus.FAILED, result.status());
+        assertEquals("模型决策失败，请稍后重试", result.message());
+    }
+
+    @Test
     void validConfirmationExecutesAndVerifiesAppointment() {
         AgentRuntimeService runtime = runtime(new AgentDecision.ProposePlan(plan(), "请确认预约方案"));
         AgentTurnResult proposed = runtime.handleMessage(taskId, OWNER, "预约");

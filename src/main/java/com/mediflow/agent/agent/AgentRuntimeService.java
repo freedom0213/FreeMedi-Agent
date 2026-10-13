@@ -46,8 +46,16 @@ public final class AgentRuntimeService implements AgentRuntime {
 
         for (int i = 0; i < maxSteps; i++) {
             context.countStep();
-            AgentDecision decision = decisionModel.decide(
-                    new DecisionContext(context.snapshot(), message, toolResults), toolExecutor.tools());
+            AgentDecision decision;
+            try {
+                decision = decisionModel.decide(
+                        new DecisionContext(context.snapshot(), message, toolResults), toolExecutor.tools());
+            } catch (RuntimeException exception) {
+                return failTurn(context, events, "模型决策失败，请稍后重试");
+            }
+            if (decision == null) {
+                return failTurn(context, events, "模型返回了空决策");
+            }
             if (decision instanceof AgentDecision.AskUser askUser) {
                 context.transitionTo(TaskStatus.NEED_MORE_INFO);
                 events.add(new AgentEvent("QUESTION_ASKED", askUser.question()));
@@ -60,7 +68,12 @@ public final class AgentRuntimeService implements AgentRuntime {
                 }
                 ToolCall call = callReadTool.call();
                 events.add(new AgentEvent("READ_TOOL_STARTED", call.name()));
-                ToolResult toolResult = toolExecutor.execute(call, context.snapshot());
+                ToolResult toolResult;
+                try {
+                    toolResult = toolExecutor.execute(call, context.snapshot());
+                } catch (RuntimeException exception) {
+                    return failTurn(context, events, "工具执行失败，请稍后重试");
+                }
                 toolResults.add(toolResult);
                 context.setLastToolResult(toolResult);
                 if (!toolResult.success()) {
@@ -74,16 +87,20 @@ public final class AgentRuntimeService implements AgentRuntime {
                 continue;
             }
             if (decision instanceof AgentDecision.ProposePlan proposePlan) {
-                TaskStatus currentStatus = context.snapshot().status();
-                if (currentStatus == TaskStatus.UNDERSTANDING || currentStatus == TaskStatus.SEARCHING) {
-                    context.transitionTo(TaskStatus.PROPOSAL_READY);
+                try {
+                    TaskStatus currentStatus = context.snapshot().status();
+                    if (currentStatus == TaskStatus.UNDERSTANDING || currentStatus == TaskStatus.SEARCHING) {
+                        context.transitionTo(TaskStatus.PROPOSAL_READY);
+                    }
+                    AppointmentPlan plan = context.createPlan(proposePlan.draft());
+                    context.transitionTo(TaskStatus.AWAITING_CONFIRMATION);
+                    events.add(new AgentEvent("PLAN_PROPOSED", plan.id().value()));
+                    events.add(new AgentEvent("CONFIRMATION_REQUIRED", plan.id().value()));
+                    stateStore.save(context);
+                    return result(proposePlan.message(), context, events);
+                } catch (IllegalArgumentException | IllegalStateException exception) {
+                    return failTurn(context, events, "预约方案无效，无法继续处理");
                 }
-                AppointmentPlan plan = context.createPlan(proposePlan.draft());
-                context.transitionTo(TaskStatus.AWAITING_CONFIRMATION);
-                events.add(new AgentEvent("PLAN_PROPOSED", plan.id().value()));
-                events.add(new AgentEvent("CONFIRMATION_REQUIRED", plan.id().value()));
-                stateStore.save(context);
-                return result(proposePlan.message(), context, events);
             }
             if (decision instanceof AgentDecision.Finish finish) {
                 context.transitionTo(TaskStatus.COMPLETED);
@@ -160,6 +177,13 @@ public final class AgentRuntimeService implements AgentRuntime {
 
     private AgentTurnResult result(String message, TaskContext context, List<AgentEvent> events) {
         return new AgentTurnResult(message, context.snapshot().status(), events, context.snapshot());
+    }
+
+    private AgentTurnResult failTurn(TaskContext context, List<AgentEvent> events, String message) {
+        context.transitionTo(TaskStatus.FAILED);
+        events.add(new AgentEvent("TASK_FAILED", message));
+        stateStore.save(context);
+        return result(message, context, events);
     }
 
     private ConfirmationResult confirmationFailure(String message, TaskContext context) {
