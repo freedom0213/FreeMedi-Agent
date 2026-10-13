@@ -1,0 +1,30 @@
+# Java / Spring Boot
+target/
+**/target/
+*.class
+*.jar
+*.war
+*.log
+logs/
+application-local.yml
+application-secret.yml
+
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Vue
+node_modules/
+dist/
+
+# IDE and operating system
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Local uploads and runtime data
+data/
+uploads/
