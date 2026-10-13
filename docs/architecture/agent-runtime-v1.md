@@ -319,4 +319,4 @@ AgentRuntime 的测试不依赖真实模型，通过 `FakeDecisionModel` 控制�
 - RAG 的切块、索引和知识库管理页面；
 - 取消、改期和多任务并行。
 
-逻辑数据模型已记录在《MediFlow Agent 数据库设计 v1》中，后续再评审并生成 DDL。
+逻辑数据模型已记录在[数据模型 v1](../database/data-model-v1.md)中，后续再评审并生成 DDL。
