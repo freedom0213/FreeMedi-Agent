@@ -80,7 +80,7 @@ public interface AgentRuntime {
             TaskId taskId,
             Principal principal,
             PlanId planId,
-            String planVersion,
+            int planVersion,
             String idempotencyKey);
 
     TaskSnapshot getTask(TaskId taskId, Principal principal);
@@ -122,7 +122,8 @@ FINISH(message)
 
 ```java
 public interface ReadToolExecutor {
-    ToolResult execute(String toolName, JsonNode arguments, TaskContext context);
+    ToolResult execute(ToolCall call, TaskSnapshot task);
+    List<ReadToolSpec> tools();
 }
 ```
 
