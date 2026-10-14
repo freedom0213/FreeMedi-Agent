@@ -21,6 +21,7 @@ import java.util.concurrent.Future;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mediflow.agent.agent.*;
+import com.mediflow.agent.appointment.MySqlAppointmentApplicationService;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -48,6 +49,7 @@ class MySqlTaskStateStoreTest {
     @Autowired PlatformTransactionManager transactionManager;
     @Autowired JdbcTemplate jdbc;
     @Autowired Flyway flyway;
+    @Autowired MySqlAppointmentApplicationService appointmentService;
 
     private long patientId;
     private long sessionId;
@@ -101,7 +103,7 @@ class MySqlTaskStateStoreTest {
     @Test
     void migrationsCanBeValidatedAndReappliedWithoutChanges() {
         flyway.validate();
-        assertThat(flyway.info().applied()).hasSize(2);
+        assertThat(flyway.info().applied()).hasSize(3);
         assertThat(flyway.migrate().migrationsExecuted).isZero();
         assertThat(jdbc.queryForObject("SELECT @@session.time_zone", String.class)).isEqualTo("+00:00");
     }
@@ -240,6 +242,61 @@ class MySqlTaskStateStoreTest {
         assertThat(store.load(taskId).snapshot().turns().get(0).status()).isEqualTo("FAILED");
     }
 
+    @Test
+    void confirmedAppointmentLocksSlotAndRetriesByIdempotencyKey() {
+        PlanDraft draft = futurePlan(slotId);
+        AgentRuntime runtime = new AgentRuntimeService(store,
+                model(new AgentDecision.ProposePlan(draft, "请确认方案")),
+                new InMemoryReadToolExecutor(), appointmentService, 5, CLOCK);
+        AgentTurnResult proposed = runtime.handleMessage(taskId, principal, "预约测试科室");
+        AppointmentPlan proposedPlan = proposed.task().activePlan().orElseThrow();
+
+        ConfirmationResult confirmed = runtime.confirmPlan(
+                taskId, principal, proposedPlan.id(), proposedPlan.version(), "mysql-idem-1");
+
+        assertThat(confirmed.success()).isTrue();
+        String appointmentNo = confirmed.events().stream()
+                .filter(event -> "EXECUTION_VERIFIED".equals(event.type()))
+                .findFirst().orElseThrow().summary();
+        assertThat(appointmentService.verify(appointmentNo, principal).success()).isTrue();
+        assertThat(jdbc.queryForObject("SELECT status FROM appointment_slot WHERE id = ?", String.class, slotId))
+                .isEqualTo("RESERVED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?", Long.class,
+                patientId)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM operation_audit_log WHERE patient_id = ?", Long.class,
+                patientId)).isEqualTo(1);
+
+        AppointmentPlan confirmedPlan = new AppointmentPlan(proposedPlan.id(), proposedPlan.version(),
+                draft, PlanStatus.CONFIRMED);
+        AppointmentExecutionResult repeated = appointmentService.createConfirmedAppointment(
+                confirmedPlan, principal, "mysql-idem-1");
+        assertThat(repeated.success()).isTrue();
+        assertThat(repeated.message()).contains("已存在");
+
+        TaskId competingTaskId = store.create(sessionId, patientId);
+        AgentRuntime competingRuntime = new AgentRuntimeService(store,
+                model(new AgentDecision.ProposePlan(draft, "同一号源的另一个候选方案")),
+                new InMemoryReadToolExecutor(), appointmentService, 5, CLOCK);
+        AppointmentPlan competingPlan = competingRuntime
+                .handleMessage(competingTaskId, principal, "再试一次预约")
+                .task().activePlan().orElseThrow();
+
+        AppointmentExecutionResult conflictingKey = appointmentService.createConfirmedAppointment(
+                new AppointmentPlan(competingPlan.id(), competingPlan.version(), draft, PlanStatus.CONFIRMED),
+                principal, "mysql-idem-1");
+        assertThat(conflictingKey.success()).isFalse();
+        assertThat(conflictingKey.code()).isEqualTo("IDEMPOTENCY_CONFLICT");
+
+        ConfirmationResult occupied = competingRuntime.confirmPlan(competingTaskId, principal,
+                competingPlan.id(), competingPlan.version(), "mysql-idem-2");
+        assertThat(occupied.success()).isFalse();
+        assertThat(occupied.message()).contains("号源已被占用");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?", Long.class,
+                patientId)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM operation_audit_log WHERE patient_id = ?",
+                Long.class, patientId)).isEqualTo(1);
+    }
+
     private boolean saveAfterBarrier(TaskContext context, CyclicBarrier start) throws Exception {
         start.await();
         try {
@@ -268,5 +325,10 @@ class MySqlTaskStateStoreTest {
     private PlanDraft plan(long targetSlotId) {
         return new PlanDraft(patientId, departmentId, doctorId, targetSlotId, LocalDate.of(2026, 10, 21),
                 "14:00-14:30", Instant.parse("2026-10-13T01:00:00Z"));
+    }
+
+    private PlanDraft futurePlan(long targetSlotId) {
+        return new PlanDraft(patientId, departmentId, doctorId, targetSlotId, LocalDate.of(2027, 1, 15),
+                "14:00-14:30", Instant.parse("2027-01-01T00:00:00Z"));
     }
 }
