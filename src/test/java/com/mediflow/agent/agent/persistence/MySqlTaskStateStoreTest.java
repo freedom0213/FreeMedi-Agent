@@ -22,6 +22,7 @@ import java.util.concurrent.Future;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mediflow.agent.agent.*;
 import com.mediflow.agent.appointment.MySqlAppointmentApplicationService;
+import com.mediflow.agent.appointment.MySqlReadToolExecutor;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -50,6 +51,7 @@ class MySqlTaskStateStoreTest {
     @Autowired JdbcTemplate jdbc;
     @Autowired Flyway flyway;
     @Autowired MySqlAppointmentApplicationService appointmentService;
+    @Autowired MySqlReadToolExecutor readToolExecutor;
 
     private long patientId;
     private long sessionId;
@@ -295,6 +297,65 @@ class MySqlTaskStateStoreTest {
                 patientId)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM operation_audit_log WHERE patient_id = ?",
                 Long.class, patientId)).isEqualTo(1);
+    }
+
+    @Test
+    void readToolQueriesOnlyAvailableSlotsAndReturnsStructuredData() {
+        ToolResult result = readToolExecutor.execute(
+                new ToolCall("findAvailableSlots", Map.of(
+                        "departmentId", departmentId,
+                        "appointmentDate", "2026-10-21",
+                        "clinicPeriod", "afternoon")),
+                store.load(taskId).snapshot());
+
+        assertThat(result.success()).isTrue();
+        assertThat(result.data().get("count")).isEqualTo(1);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> slot = ((java.util.List<Map<String, Object>>) result.data().get("slots"))
+                .get(0);
+        assertThat(slot).containsEntry("slotId", slotId)
+                .containsEntry("doctorId", doctorId)
+                .containsEntry("departmentId", departmentId)
+                .containsEntry("timeRange", "14:00-14:30");
+        assertThat(readToolExecutor.tools()).extracting(ReadToolSpec::name)
+                .containsExactly("findAvailableSlots", "getAppointmentRules");
+    }
+
+    @Test
+    void readToolRejectsInvalidArgumentsWithoutRunningUnsafeSql() {
+        ToolResult result = readToolExecutor.execute(
+                new ToolCall("findAvailableSlots", Map.of("clinicPeriod", "night")),
+                store.load(taskId).snapshot());
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.errorCode()).isEqualTo("INVALID_TOOL_ARGUMENT");
+    }
+
+    @Test
+    void rulesToolReturnsConfirmationGate() {
+        ToolResult result = readToolExecutor.execute(
+                new ToolCall("getAppointmentRules", Map.of()), store.load(taskId).snapshot());
+
+        assertThat(result.success()).isTrue();
+        assertThat(result.data()).containsEntry("confirmationRequired", true)
+                .containsEntry("syntheticData", true);
+    }
+
+    @Test
+    void agentRuntimeCanContinueAfterMysqlReadToolResult() {
+        AgentRuntime runtime = new AgentRuntimeService(store,
+                model(
+                        new AgentDecision.CallReadTool(new ToolCall("findAvailableSlots", Map.of(
+                                "departmentId", departmentId,
+                                "appointmentDate", "2026-10-21"))),
+                        new AgentDecision.ProposePlan(futurePlan(slotId), "已找到可用号源，请确认")),
+                readToolExecutor, new InMemoryAppointmentApplicationService(), 5, CLOCK);
+
+        AgentTurnResult result = runtime.handleMessage(taskId, principal, "帮我找测试科室的号");
+
+        assertThat(result.status()).isEqualTo(TaskStatus.AWAITING_CONFIRMATION);
+        assertThat(result.task().lastToolResult().orElseThrow().data().get("count")).isEqualTo(1);
+        assertThat(result.task().activePlan()).isPresent();
     }
 
     private boolean saveAfterBarrier(TaskContext context, CyclicBarrier start) throws Exception {

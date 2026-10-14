@@ -44,6 +44,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-mysql.ps1
 
 预约写服务在 `mysql` Profile 下以单个 MySQL 事务锁定号源、写入预约与审计记录，并以患者和幂等键识别重试。预约创建后由 AgentRuntime 在事务外核验结果。集成测试覆盖重复幂等请求和另一个方案竞争已占号源的场景。
 
+`MySqlReadToolExecutor` 在同一 Profile 下提供 `findAvailableSlots` 和 `getAppointmentRules` 两个只读工具。号源查询只读取 `AVAILABLE`、开放排班和启用中的科室/医生，使用参数化筛选和结果上限；工具结果可以直接作为下一轮模型决策上下文，但不会执行预约写入。
+
 ## 尚未纳入本适配器的内容
 
 - 任务 API 的 request id 幂等入口；
