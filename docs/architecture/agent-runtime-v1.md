@@ -168,6 +168,8 @@ public interface TaskStateStore {
 
 Redis 用于同一任务的短租约、限流和可重建缓存，不作为任务状态的唯一存储。MySQL 事务、行锁或乐观锁负责最终一致性。
 
+当前代码已提供 `MySqlTaskStateStore`：任务检查点使用 `agent_task.state_version` 做乐观锁，任务轮次、工具调用、方案和状态事件在同一事务中保存；加载任务时会恢复这些持久化记录。`InMemoryTaskStateStore` 仅用于行为测试。
+
 ### 3.6 `AgentEventPublisher`：前端轨迹适配器
 
 负责把领域事件转换为 SSE 或其他前端传输格式。它不参与 Agent 决策。

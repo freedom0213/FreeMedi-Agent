@@ -4,16 +4,23 @@ spring:
   jackson:
     time-zone: UTC
   datasource:
-    url: ${MEDIFLOW_DB_URL:jdbc:mysql://localhost:3306/mediflow?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC}
+    url: ${MEDIFLOW_DB_URL:jdbc:mysql://localhost:3306/mediflow?useUnicode=true&characterEncoding=utf8&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
     username: ${MEDIFLOW_DB_USERNAME:mediflow}
     password: ${MEDIFLOW_DB_PASSWORD:mediflow}
     driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      connection-init-sql: SET time_zone = '+00:00'
   data:
     redis:
       host: ${MEDIFLOW_REDIS_HOST:localhost}
       port: ${MEDIFLOW_REDIS_PORT:6379}
   flyway:
     enabled: ${MEDIFLOW_FLYWAY_ENABLED:false}
+    clean-disabled: true
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
 
 server:
   port: ${MEDIFLOW_SERVER_PORT:8080}

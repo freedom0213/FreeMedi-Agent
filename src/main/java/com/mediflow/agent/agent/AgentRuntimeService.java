@@ -37,7 +37,7 @@ public final class AgentRuntimeService implements AgentRuntime {
         }
         TaskContext context = stateStore.load(taskId);
         assertOwner(context, principal);
-        context.beginTurn();
+        context.beginTurn(message);
         stateStore.save(context);
 
         List<AgentEvent> events = new ArrayList<>();
@@ -59,7 +59,6 @@ public final class AgentRuntimeService implements AgentRuntime {
             if (decision instanceof AgentDecision.AskUser askUser) {
                 context.transitionTo(TaskStatus.NEED_MORE_INFO);
                 events.add(new AgentEvent("QUESTION_ASKED", askUser.question()));
-                stateStore.save(context);
                 return result(askUser.question(), context, events);
             }
             if (decision instanceof AgentDecision.CallReadTool callReadTool) {
@@ -68,18 +67,27 @@ public final class AgentRuntimeService implements AgentRuntime {
                 }
                 ToolCall call = callReadTool.call();
                 events.add(new AgentEvent("READ_TOOL_STARTED", call.name()));
+                int callNo = context.startTool(call);
+                stateStore.save(context);
+                long started = System.nanoTime();
                 ToolResult toolResult;
                 try {
                     toolResult = toolExecutor.execute(call, context.snapshot());
                 } catch (RuntimeException exception) {
+                    context.finishTool(callNo, call, ToolResult.failure("TOOL_ERROR", "工具执行失败"),
+                            (System.nanoTime() - started) / 1_000_000);
                     return failTurn(context, events, "工具执行失败，请稍后重试");
                 }
+                if (toolResult == null) {
+                    context.finishTool(callNo, call, ToolResult.failure("EMPTY_TOOL_RESULT", "工具返回空结果"),
+                            (System.nanoTime() - started) / 1_000_000);
+                    return failTurn(context, events, "工具返回了空结果");
+                }
                 toolResults.add(toolResult);
-                context.setLastToolResult(toolResult);
+                context.finishTool(callNo, call, toolResult, (System.nanoTime() - started) / 1_000_000);
                 if (!toolResult.success()) {
                     context.transitionTo(TaskStatus.FAILED);
                     events.add(new AgentEvent("READ_TOOL_FAILED", toolResult.errorMessage()));
-                    stateStore.save(context);
                     return result("查询失败：" + toolResult.errorMessage(), context, events);
                 }
                 events.add(new AgentEvent("READ_TOOL_SUCCEEDED", call.name()));
@@ -87,32 +95,30 @@ public final class AgentRuntimeService implements AgentRuntime {
                 continue;
             }
             if (decision instanceof AgentDecision.ProposePlan proposePlan) {
+                AppointmentPlan plan;
                 try {
                     TaskStatus currentStatus = context.snapshot().status();
                     if (currentStatus == TaskStatus.UNDERSTANDING || currentStatus == TaskStatus.SEARCHING) {
                         context.transitionTo(TaskStatus.PROPOSAL_READY);
                     }
-                    AppointmentPlan plan = context.createPlan(proposePlan.draft());
+                    plan = context.createPlan(proposePlan.draft());
                     context.transitionTo(TaskStatus.AWAITING_CONFIRMATION);
-                    events.add(new AgentEvent("PLAN_PROPOSED", plan.id().value()));
-                    events.add(new AgentEvent("CONFIRMATION_REQUIRED", plan.id().value()));
-                    stateStore.save(context);
-                    return result(proposePlan.message(), context, events);
                 } catch (IllegalArgumentException | IllegalStateException exception) {
                     return failTurn(context, events, "预约方案无效，无法继续处理");
                 }
+                events.add(new AgentEvent("PLAN_PROPOSED", plan.id().value()));
+                events.add(new AgentEvent("CONFIRMATION_REQUIRED", plan.id().value()));
+                return result(proposePlan.message(), context, events);
             }
             if (decision instanceof AgentDecision.Finish finish) {
                 context.transitionTo(TaskStatus.COMPLETED);
                 events.add(new AgentEvent("TASK_COMPLETED", finish.message()));
-                stateStore.save(context);
                 return result(finish.message(), context, events);
             }
         }
 
         context.transitionTo(TaskStatus.FAILED);
         events.add(new AgentEvent("TASK_FAILED", "超过最大 Agent 步骤数"));
-        stateStore.save(context);
         return result("任务步骤过多，暂时无法完成预约。", context, events);
     }
 
@@ -131,7 +137,8 @@ public final class AgentRuntimeService implements AgentRuntime {
         if (!plan.id().equals(planId) || plan.version() != planVersion) {
             return confirmationFailure("预约方案已发生变化，请重新查询", context);
         }
-        if (plan.draft().expiresAt().isBefore(Instant.now(clock))) {
+        if (!plan.draft().expiresAt().isAfter(Instant.now(clock))) {
+            context.setPlanStatus(PlanStatus.EXPIRED);
             context.transitionTo(TaskStatus.SEARCHING);
             stateStore.save(context);
             return confirmationFailure("预约方案已过期，请重新查询号源", context);
@@ -139,7 +146,10 @@ public final class AgentRuntimeService implements AgentRuntime {
 
         List<AgentEvent> events = new ArrayList<>();
         context.transitionTo(TaskStatus.EXECUTING);
+        context.setPlanStatus(PlanStatus.CONFIRMED);
         events.add(new AgentEvent("EXECUTION_STARTED", plan.id().value()));
+        // Persist the ownership claim before invoking a write; a competing request must fail its CAS.
+        stateStore.save(context);
         AppointmentExecutionResult execution = appointmentService
                 .createConfirmedAppointment(plan, principal, idempotencyKey);
         if (!execution.success()) {
@@ -151,6 +161,9 @@ public final class AgentRuntimeService implements AgentRuntime {
         }
 
         context.transitionTo(TaskStatus.VERIFYING);
+        context.setPlanStatus(PlanStatus.EXECUTED);
+        context.putFact("appointmentId", execution.appointmentId());
+        stateStore.save(context);
         AppointmentVerificationResult verification = appointmentService.verify(execution.appointmentId(), principal);
         if (!verification.success()) {
             context.transitionTo(TaskStatus.FAILED);
@@ -176,13 +189,14 @@ public final class AgentRuntimeService implements AgentRuntime {
     }
 
     private AgentTurnResult result(String message, TaskContext context, List<AgentEvent> events) {
+        context.completeTurn(message);
+        stateStore.save(context);
         return new AgentTurnResult(message, context.snapshot().status(), events, context.snapshot());
     }
 
     private AgentTurnResult failTurn(TaskContext context, List<AgentEvent> events, String message) {
         context.transitionTo(TaskStatus.FAILED);
         events.add(new AgentEvent("TASK_FAILED", message));
-        stateStore.save(context);
         return result(message, context, events);
     }
 

@@ -1,6 +1,7 @@
 package com.mediflow.agent.agent;
 
 import java.util.Map;
+import java.util.List;
 import java.util.Optional;
 
 public record TaskSnapshot(
@@ -11,11 +12,13 @@ public record TaskSnapshot(
         int turnCount,
         Map<String, Object> facts,
         Optional<AppointmentPlan> activePlan,
-        Optional<ToolResult> lastToolResult) {
+        Optional<ToolResult> lastToolResult,
+        List<TaskTurn> turns) {
 
     public TaskSnapshot {
         facts = facts == null ? Map.of() : Map.copyOf(facts);
         activePlan = activePlan == null ? Optional.empty() : activePlan;
         lastToolResult = lastToolResult == null ? Optional.empty() : lastToolResult;
+        turns = turns == null ? List.of() : List.copyOf(turns);
     }
 }
