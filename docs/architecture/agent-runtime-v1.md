@@ -97,7 +97,7 @@ public interface AgentRuntime {
 
 ### 3.2 `DecisionModel`：模型适配器
 
-负责把任务上下文和只读工具说明发送给 DeepSeek，并将响应解析成有限的结构化决策。
+`DeepSeekDecisionModel` 使用 LangChain4j OpenAI 兼容接口，把任务上下文和只读工具 JSON Schema 发送给 DeepSeek，并将 `tool_calls` 响应映射为 `CALL_READ_TOOL`。普通文本响应必须是受限 JSON，再映射为 `ASK_USER`、`PROPOSE_PLAN` 或 `FINISH`。患者身份与方案过期时间由后端注入，不由模型决定。未配置 `DEEPSEEK_API_KEY` 时，`DemoDecisionModel` 作为确定性本地演示适配器。
 
 ```java
 public interface DecisionModel {
@@ -284,7 +284,7 @@ expiresAt
 - `FakeAppointmentCatalog`：提供固定科室、医生和号源；
 - `FakeAppointmentApplicationService`：模拟号源占用、幂等和核验；
 - `FakeDecisionModel`：测试中返回预先定义的决策序列；
-- `DeepSeekDecisionModel`：真实演示时调用 DeepSeek。
+- `DeepSeekDecisionModel`：配置 API Key 后调用 DeepSeek Function Calling。
 
 这样可以先验证 Agent 的核心行为：追问、工具循环、方案暂停、确认门禁、号源失效和失败终态。后续引入数据库时，只需要替换状态存储和预约领域适配器，不需要重写 AgentRuntime。
 

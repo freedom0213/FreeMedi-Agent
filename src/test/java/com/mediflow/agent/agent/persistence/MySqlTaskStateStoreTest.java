@@ -74,6 +74,7 @@ class MySqlTaskStateStoreTest {
 
     @DynamicPropertySource
     static void mysqlProperties(DynamicPropertyRegistry registry) {
+        registry.add("mediflow.llm.api-key", () -> "");
         registry.add("spring.datasource.url", () -> System.getProperty("mediflow.test.db.url"));
         registry.add("spring.datasource.username", () ->
                 System.getProperty("mediflow.test.db.username", "root"));

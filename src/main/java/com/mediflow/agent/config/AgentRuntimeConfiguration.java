@@ -8,9 +8,11 @@ import com.mediflow.agent.agent.AppointmentApplicationService;
 import com.mediflow.agent.agent.DecisionModel;
 import com.mediflow.agent.agent.ReadToolExecutor;
 import com.mediflow.agent.agent.TaskStateStore;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.langchain4j.model.chat.ChatLanguageModel;
+import dev.langchain4j.model.openai.OpenAiChatModel;
 
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
@@ -19,9 +21,25 @@ import org.springframework.context.annotation.Profile;
 @Profile("mysql")
 public class AgentRuntimeConfiguration {
     @Bean
-    @ConditionalOnMissingBean(DecisionModel.class)
-    DemoDecisionModel demoDecisionModel() {
-        return new DemoDecisionModel();
+    DecisionModel decisionModel(
+            ObjectMapper objectMapper,
+            @Value("${mediflow.llm.api-key:}") String apiKey,
+            @Value("${mediflow.llm.base-url:https://api.deepseek.com/v1}") String baseUrl,
+            @Value("${mediflow.llm.model:deepseek-chat}") String modelName) {
+        if (apiKey == null || apiKey.isBlank()) {
+            return new DemoDecisionModel();
+        }
+        ChatLanguageModel model = OpenAiChatModel.builder()
+                .apiKey(apiKey)
+                .baseUrl(baseUrl)
+                .modelName(modelName)
+                .temperature(0.1)
+                .maxTokens(1200)
+                .strictTools(false)
+                .logRequests(false)
+                .logResponses(false)
+                .build();
+        return new DeepSeekDecisionModel(model, objectMapper);
     }
 
     @Bean

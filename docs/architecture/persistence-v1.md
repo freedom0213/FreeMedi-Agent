@@ -58,6 +58,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-mysql.ps1
 
 演示身份只用于本地求职作品，不是生产认证方案。事件回放使用 SSE 传输格式逐条发送历史事件，因此具备流式传输形式，但当前 Agent 调用完成后事件才可读取；DeepSeek token 级实时流和多实例事件推送属于后续能力。
 
+配置 `DEEPSEEK_API_KEY` 后，`DeepSeekDecisionModel` 使用 LangChain4j 0.35.0 和 OpenAI 兼容接口向模型声明只读工具，并把模型返回的工具调用交给 `AgentRuntime` 执行。未配置密钥时自动使用确定性 `DemoDecisionModel`，可离线走通演示闭环。真实 DeepSeek API 调用需要有效密钥和网络访问，本地测试通过 mock 模型验证适配器映射，不会产生模型 API 费用。
+
 ## 尚未纳入本适配器的内容
 
 - 任务 API 的 request id 幂等入口；
