@@ -2,6 +2,11 @@ package com.mediflow.agent.agent.persistence;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -28,17 +33,21 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.http.MediaType;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.test.web.servlet.MockMvc;
 
 /** Real MySQL tests. The supplied URL must point to an isolated, initially empty test schema. */
 @SpringBootTest(properties = "spring.flyway.enabled=true")
+@AutoConfigureMockMvc
 @ActiveProfiles({"test", "mysql"})
 @EnabledIfSystemProperty(named = "mediflow.test.db.url", matches = ".+")
 class MySqlTaskStateStoreTest {
@@ -52,6 +61,8 @@ class MySqlTaskStateStoreTest {
     @Autowired Flyway flyway;
     @Autowired MySqlAppointmentApplicationService appointmentService;
     @Autowired MySqlReadToolExecutor readToolExecutor;
+    @Autowired MockMvc mockMvc;
+    @Autowired AgentRuntime runtime;
 
     private long patientId;
     private long sessionId;
@@ -356,6 +367,45 @@ class MySqlTaskStateStoreTest {
         assertThat(result.status()).isEqualTo(TaskStatus.AWAITING_CONFIRMATION);
         assertThat(result.task().lastToolResult().orElseThrow().data().get("count")).isEqualTo(1);
         assertThat(result.task().activePlan()).isPresent();
+    }
+
+    @Test
+    void httpApiCompletesDemoAppointmentAndReplaysSseEvents() throws Exception {
+        String created = mockMvc.perform(post("/api/v1/tasks")
+                        .header("X-Demo-User-Id", "1001")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("UNDERSTANDING"))
+                .andReturn().getResponse().getContentAsString();
+        String apiTaskId = json.readTree(created).get("taskId").asText();
+
+        mockMvc.perform(post("/api/v1/tasks/{taskId}/messages", apiTaskId)
+                        .header("X-Demo-User-Id", "1001")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"message\":\"帮我预约一个号源\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("AWAITING_CONFIRMATION"));
+
+        Principal demoPatient = new Principal(1001L, "PATIENT");
+        AppointmentPlan apiPlan = runtime.getTask(new TaskId(apiTaskId), demoPatient)
+                .activePlan().orElseThrow();
+        String confirm = "{\"planId\":\"" + apiPlan.id().value()
+                + "\",\"planVersion\":" + apiPlan.version()
+                + ",\"idempotencyKey\":\"api-idem-1\"}";
+        mockMvc.perform(post("/api/v1/tasks/{taskId}/confirm", apiTaskId)
+                        .header("X-Demo-User-Id", "1001")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(confirm))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true));
+
+        mockMvc.perform(get("/api/v1/tasks/{taskId}/events", apiTaskId)
+                        .header("X-Demo-User-Id", "1001")
+                        .accept(MediaType.TEXT_EVENT_STREAM))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("READ_TOOL_SUCCEEDED")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("STREAM_COMPLETED")));
     }
 
     private boolean saveAfterBarrier(TaskContext context, CyclicBarrier start) throws Exception {

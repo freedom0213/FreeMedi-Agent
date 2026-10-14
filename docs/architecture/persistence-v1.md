@@ -46,6 +46,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-mysql.ps1
 
 `MySqlReadToolExecutor` 在同一 Profile 下提供 `findAvailableSlots` 和 `getAppointmentRules` 两个只读工具。号源查询只读取 `AVAILABLE`、开放排班和启用中的科室/医生，使用参数化筛选和结果上限；工具结果可以直接作为下一轮模型决策上下文，但不会执行预约写入。
 
+## API 与 SSE 演示边界
+
+`mysql` Profile 下提供以下最小接口：
+
+- `POST /api/v1/tasks`：使用 `X-Demo-User-Id` 创建本地演示任务；
+- `POST /api/v1/tasks/{taskId}/messages`：处理一轮用户消息；
+- `POST /api/v1/tasks/{taskId}/confirm`：提交方案版本和幂等键，执行确认预约；
+- `GET /api/v1/tasks/{taskId}`：查询任务快照；
+- `GET /api/v1/tasks/{taskId}/events`：以 `text/event-stream` 回放数据库中已有的状态迁移和工具调用事件。
+
+演示身份只用于本地求职作品，不是生产认证方案。事件回放使用 SSE 传输格式逐条发送历史事件，因此具备流式传输形式，但当前 Agent 调用完成后事件才可读取；DeepSeek token 级实时流和多实例事件推送属于后续能力。
+
 ## 尚未纳入本适配器的内容
 
 - 任务 API 的 request id 幂等入口；
