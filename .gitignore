@@ -8,6 +8,7 @@ target/
 logs/
 application-local.yml
 application-secret.yml
+/config/application-mysql.yml
 
 # Local secrets
 .env
@@ -28,3 +29,6 @@ Thumbs.db
 # Local uploads and runtime data
 data/
 uploads/
+
+# Local agent workspace data
+.workbuddy/
