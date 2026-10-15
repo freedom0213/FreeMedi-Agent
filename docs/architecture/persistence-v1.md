@@ -26,7 +26,16 @@ MySQL 适配器保存任务当前状态、事实 JSON、最新工具结果、对
 
 - `V1__initial_schema.sql`：用户、医院目录、号源、预约、Agent 任务及审计表；
 - `V2__task_last_tool_result.sql`：为任务增加最新工具结果字段；
-- `V3__seed_demo_data.sql`：写入合成患者、管理员、科室、医生、排班和号源，仅供本地演示。
+- `V3__seed_demo_data.sql`：写入合成患者、管理员、科室、医生和固定日期排班号源，仅供本地演示；
+- `V4__seed_near_term_demo_slots.sql`、`V5__seed_neurology_and_gastroenterology.sql`：按 `CURRENT_DATE()` 生成迁移当天的未来 1—14 天排班号源，并补充神经内科和消化内科医生。
+
+迁移只执行一次，因此 V4/V5 生成的近期待选时间会随时间自然耗尽。需要续期时运行：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/seed-demo-slots.ps1 -MySqlBin <mysql bin 目录>
+```
+
+该脚本执行 `database/seed-demo-slots.sql`，按 `CURRENT_DATE()` 重新生成未来 N 天（默认 14，上限 30）的排班和号源，可反复运行：既有的排班、已被预约或关闭的号源都不会被覆盖，新加入的启用中医生会自动补齐。
 
 默认配置关闭 Flyway，避免开发者启动应用时意外连接本地数据库。使用 `mysql` Profile 时开启迁移，并要求指向专用的 `mediflow` 数据库，例如：
 
