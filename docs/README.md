@@ -1,10 +1,14 @@
-# MediFlow Agent 文档索引
+# FreeMedi-Agent 文档索引
 
 ## 当前基线
 
 | 分类 | 文档 | 用途 | 状态 |
 |---|---|---|---|
+| 设计 | [前端方向 v1](design/frontend-direction-v1.md) | 产品门户定位、页面信息架构和视觉原则 | 已确认 |
+| 设计 | [前端布局方案 v1](design/frontend-layout-v1.md) | 患者端页面、Agent 流程和后续管理端布局 | 患者端首版已实现 |
 | 产品 | [项目计划 v2](product/project-plan-v2.md) | 项目范围、业务主线和验收标准 | 当前产品基线 |
+| 产品 | [整体交付计划 v1](product/delivery-roadmap-v1.md) | Agent、RAG、预约业务、前端和简历交付阶段 | 当前执行计划 |
+| 产品 | [患者导诊与预约修复记录](product/patient-guide-acceptance.md) | 用户反馈、修复边界、验证证据与复测建议 | 本轮已验证 |
 | 产品 | [项目现状文档](product/project-status.md) | 初始规划和讨论记录 | 历史参考 |
 | 架构 | [Agent Runtime v1](architecture/agent-runtime-v1.md) | Agent 执行循环、模块职责、状态和确认门禁 | 当前技术基线 |
 | 架构 | [持久化实现 v1](architecture/persistence-v1.md) | MySQL 任务恢复、乐观锁和 Flyway 迁移 | 当前实现基线 |
@@ -22,7 +26,9 @@
 
 ## 当前状态
 
-项目已完成 AgentRuntime 核心行为、MySQL 持久化、只读号源查询工具、预约写服务、最小 HTTP/SSE API 和 DeepSeek Function Calling 适配器的首版实现。Flyway 管理任务与医院演示数据，任务恢复、方案/轮次/工具/状态事件保存、乐观锁、号源查询、确认后原子占用号源、预约幂等、核验、任务接口和事件回放均已接入；MySQL 集成测试在 8.0.34 上验证，MySQL 8.4 尚未验证。配置 `DEEPSEEK_API_KEY` 后使用真实模型，未配置时使用确定性演示模型。当前 API 使用 `X-Demo-User-Id` 解析本地演示账号，SSE 回放已持久化的状态与工具事件，不等同于模型 token 实时流。Redis 和 Vue 前端仍未接入。V3 提供的账号、科室、医生、排班和号源均为合成演示数据，不代表真实医院或医疗信息。技术基线已经确定：
+项目英文名称已确认为 **FreeMedi-Agent**。README 暂不修改。前端视觉方向已确认为 A+B：Codex 式克制视觉与 Linear 式状态组织；首页定位为智慧医院就诊服务门户，不是对话编辑器。
+
+项目已完成 AgentRuntime 核心行为、MySQL 持久化、只读号源查询工具、预约写服务、最小 HTTP/SSE API 和 DeepSeek Function Calling 适配器的首版实现。任务恢复、方案/轮次/工具/状态事件保存、乐观锁、确认后原子占用号源、预约幂等与核验均已接入；MySQL 集成测试在 8.0.34 上验证，MySQL 8.4 尚未验证。患者导诊已调整为症状优先、口语日期、同科室备选时间和可继续调整的待确认方案；模型协议异常有一次有限纠正，临时故障可重试。V4 已追加近期合成排班和号源，V5 已补神经内科和消化内科演示数据。患者端已支持发起智能分诊和发送消息即时显示。真实模型 HTTP 场景及浏览器预约闭环已通过；**53 项自动化测试全部执行通过（0 失败 0 跳过，含 19 项隔离 MySQL 集成测试）**，注意裸 `mvn test` 会跳过这 19 项，必须通过 `scripts/test-mysql.ps1` 运行才等价于全量通过。最近号源请求经修复后重复实测通过。详情与限制见[患者导诊与预约修复记录](product/patient-guide-acceptance.md)。普通挂号、科室目录和个人预约查询接口尚未提供，Redis 尚未接入。所有医院数据均为合成演示数据。技术基线已经确定：
 
 - Java 17 + Spring Boot 3.4.5 + LangChain4j 0.35.0；
 - MySQL 8.4 作为持久化事实来源；
@@ -31,6 +37,8 @@
 - DeepSeek 作为模型服务；
 - Git 仅做本地管理，不配置远程仓库。
 
+API key 保存在 Git 忽略的本地外置配置 `config/application-mysql.yml`，从项目根目录以 `mysql` profile 启动会自动加载，无需每次重新配置。演示 API 使用 `X-Demo-User-Id` 识别本地账号。SSE 现有两条不同路径：`POST /api/v1/tasks/{taskId}/messages/stream` 是真实模型增量流（未配置 Key 时使用本地确定性回退），`GET /api/v1/tasks/{taskId}/events` 是已持久化事件的回放。
+
 ## 下一步推荐
 
-下一步将 Vue 页面连接到这些 API，展示真实模型的追问、工具调用和方案确认轨迹；之后加入 Redis 短租约，降低同一任务并发处理冲突。
+2026-10-15 已完成最近号源追问修复、头痛/腹痛演示数据、智能分诊入口和发送即时显示。整体开发按[整体交付计划 v1](product/delivery-roadmap-v1.md)推进，下一阶段固定为 M1：完成真实模型流式回复、结构化分诊推荐和恢复验证；随后依次完成完整预约服务、RAG、最小管理端、稳定性和简历交付。每次会话报告计划中的阶段和证据，不再单独追加脱离总计划的下一步。
