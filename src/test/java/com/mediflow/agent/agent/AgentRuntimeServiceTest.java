@@ -9,6 +9,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -68,6 +69,25 @@ class AgentRuntimeServiceTest {
     }
 
     @Test
+    void conversationCanContinueAfterTransientModelError() {
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        DecisionModel model = (context, tools) -> {
+            if (calls.getAndIncrement() == 0) throw new IllegalStateException("transient provider error");
+            return new AgentDecision.AskUser("您哪里不舒服？", Set.of());
+        };
+        AgentRuntimeService runtime = new AgentRuntimeService(stateStore, model, new InMemoryReadToolExecutor(),
+                appointmentService, 5, CLOCK);
+
+        runtime.handleMessage(taskId, OWNER, "帮我预约");
+        AgentTurnResult retried = runtime.handleMessage(taskId, OWNER, "我最近老是咳嗽");
+
+        assertEquals(TaskStatus.NEED_MORE_INFO, retried.status());
+        assertEquals("您哪里不舒服？", retried.message());
+        assertEquals(2, retried.task().turnCount());
+        assertEquals(0, appointmentService.createdAppointmentCount());
+    }
+
+    @Test
     void unknownToolProducesControlledFailure() {
         AgentRuntimeService runtime = runtime(
                 new AgentDecision.CallReadTool(new ToolCall("deleteAppointment", Map.of())));
@@ -94,7 +114,7 @@ class AgentRuntimeServiceTest {
     }
 
     @Test
-    void modelExceptionProducesControlledFailure() {
+    void modelExceptionLeavesTaskRetryableWithoutSubmittingAppointment() {
         AgentRuntimeService runtime = new AgentRuntimeService(
                 stateStore,
                 (context, tools) -> {
@@ -107,8 +127,41 @@ class AgentRuntimeServiceTest {
 
         AgentTurnResult result = runtime.handleMessage(taskId, OWNER, "预约");
 
-        assertEquals(TaskStatus.FAILED, result.status());
-        assertEquals("模型决策失败，请稍后重试", result.message());
+        assertEquals(TaskStatus.NEED_MORE_INFO, result.status());
+        assertTrue(result.message().contains("预约尚未提交"));
+        assertTrue(result.events().stream().anyMatch(event -> "MODEL_RETRY_REQUIRED".equals(event.type())));
+        assertEquals(0, appointmentService.createdAppointmentCount());
+    }
+
+    @Test
+    void rejectedToolArgumentsKeepTaskRetryableWithoutSubmittingAppointment() {
+        ReadToolExecutor rejectsArguments = new ReadToolExecutor() {
+            @Override
+            public ToolResult execute(ToolCall call, TaskSnapshot task) {
+                return ToolResult.failure("INVALID_TOOL_ARGUMENT",
+                        "没有识别出就诊时段，可以选择上午、下午、晚上，或不限");
+            }
+
+            @Override
+            public List<ReadToolSpec> tools() {
+                return List.of(new ReadToolSpec("findAvailableSlots", "查询可用号源"));
+            }
+        };
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        DecisionModel model = (context, tools) -> calls.getAndIncrement() == 0
+                ? new AgentDecision.CallReadTool(new ToolCall("findAvailableSlots", Map.of("clinicPeriod", "早上八点")))
+                : new AgentDecision.AskUser("您希望上午、下午还是晚上就诊？", Set.of("clinicPeriod"));
+        AgentRuntimeService runtime = new AgentRuntimeService(stateStore, model, rejectsArguments,
+                appointmentService, 5, CLOCK);
+
+        AgentTurnResult rejected = runtime.handleMessage(taskId, OWNER, "帮我约个早上八点的号");
+        AgentTurnResult followUp = runtime.handleMessage(taskId, OWNER, "那就上午吧");
+
+        assertEquals(TaskStatus.NEED_MORE_INFO, rejected.status());
+        assertTrue(rejected.message().contains("时段"));
+        assertEquals(TaskStatus.NEED_MORE_INFO, followUp.status());
+        assertEquals(2, followUp.task().turnCount());
+        assertEquals(0, appointmentService.createdAppointmentCount());
     }
 
     @Test
@@ -133,6 +186,23 @@ class AgentRuntimeServiceTest {
         runtime.handleMessage(taskId, OWNER, "预约");
 
         assertEquals(0, appointmentService.createdAppointmentCount());
+    }
+
+    @Test
+    void patientCanAdjustPendingPlanAndOnlyConfirmNewVersion() {
+        AgentRuntimeService runtime = runtime(new AgentDecision.ProposePlan(plan(), "请确认"),
+                new AgentDecision.ProposePlan(plan(), "已调整，请重新核对"));
+        AppointmentPlan original = runtime.handleMessage(taskId, OWNER, "预约心内科")
+                .task().activePlan().orElseThrow();
+
+        AgentTurnResult changed = runtime.handleMessage(taskId, OWNER, "改成下午");
+        AppointmentPlan replacement = changed.task().activePlan().orElseThrow();
+
+        assertEquals(TaskStatus.AWAITING_CONFIRMATION, changed.status());
+        assertEquals(original.version() + 1, replacement.version());
+        assertFalse(runtime.confirmPlan(taskId, OWNER, original.id(), original.version(), "old-plan").success());
+        assertEquals(0, appointmentService.createdAppointmentCount());
+        assertTrue(runtime.confirmPlan(taskId, OWNER, replacement.id(), replacement.version(), "new-plan").success());
     }
 
     @Test

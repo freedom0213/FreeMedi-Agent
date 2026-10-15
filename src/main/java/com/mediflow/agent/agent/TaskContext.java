@@ -63,6 +63,10 @@ public final class TaskContext {
         if (status == TaskStatus.NEED_MORE_INFO) {
             transitionTo(TaskStatus.UNDERSTANDING);
         }
+        if (status == TaskStatus.AWAITING_CONFIRMATION) {
+            setPlanStatus(PlanStatus.INVALIDATED);
+            transitionTo(TaskStatus.SEARCHING);
+        }
         if (status != TaskStatus.UNDERSTANDING && status != TaskStatus.SEARCHING) {
             throw new IllegalStateException("task cannot accept a message in state " + status);
         }
@@ -123,6 +127,15 @@ public final class TaskContext {
 
     public synchronized void putFact(String key, Object value) {
         facts.put(key, value);
+    }
+
+    public synchronized void setRecommendation(TriageRecommendation recommendation) {
+        facts.remove("triageRecommendation");
+        if (recommendation != null) {
+            facts.put("triageRecommendation", Map.of("departmentId", recommendation.departmentId(),
+                    "departmentName", recommendation.departmentName(), "reason", recommendation.reason(),
+                    "turnNo", turnCount));
+        }
     }
 
     public synchronized void setLastToolResult(ToolResult result) {

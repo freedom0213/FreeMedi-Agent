@@ -4,8 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.time.Clock;
@@ -69,6 +71,8 @@ class MySqlTaskStateStoreTest {
     private long departmentId;
     private long doctorId;
     private long slotId;
+    private String departmentName;
+    private String doctorName;
     private TaskId taskId;
     private Principal principal;
 
@@ -86,6 +90,8 @@ class MySqlTaskStateStoreTest {
     @BeforeEach
     void setUp() {
         String marker = UUID.randomUUID().toString();
+        departmentName = "测试科室-" + marker;
+        doctorName = "测试医生-" + marker;
         jdbc.update("""
                 INSERT INTO sys_user(username, password_hash, display_name, role, status)
                 VALUES (?, 'synthetic-test-only', '测试患者', 'PATIENT', 'ACTIVE')
@@ -94,9 +100,10 @@ class MySqlTaskStateStoreTest {
         jdbc.update("INSERT INTO agent_session(patient_id, title, status) VALUES (?, ?, 'ACTIVE')",
                 patientId, marker);
         sessionId = jdbc.queryForObject("SELECT id FROM agent_session WHERE title = ?", Long.class, marker);
-        jdbc.update("INSERT INTO department(code, name, status) VALUES (?, '测试科室', 'ACTIVE')", marker);
+        jdbc.update("INSERT INTO department(code, name, status) VALUES (?, ?, 'ACTIVE')", marker, departmentName);
         departmentId = jdbc.queryForObject("SELECT id FROM department WHERE code = ?", Long.class, marker);
-        jdbc.update("INSERT INTO doctor(department_id, name, status) VALUES (?, '测试医生', 'ACTIVE')", departmentId);
+        jdbc.update("INSERT INTO doctor(department_id, name, status) VALUES (?, ?, 'ACTIVE')",
+                departmentId, doctorName);
         doctorId = jdbc.queryForObject("SELECT id FROM doctor WHERE department_id = ?", Long.class, departmentId);
         jdbc.update("""
                 INSERT INTO doctor_schedule(doctor_id, schedule_date, clinic_period, status)
@@ -117,7 +124,7 @@ class MySqlTaskStateStoreTest {
     @Test
     void migrationsCanBeValidatedAndReappliedWithoutChanges() {
         flyway.validate();
-        assertThat(flyway.info().applied()).hasSize(3);
+        assertThat(flyway.info().applied()).hasSize(5);
         assertThat(flyway.migrate().migrationsExecuted).isZero();
         assertThat(jdbc.queryForObject("SELECT @@session.time_zone", String.class)).isEqualTo("+00:00");
     }
@@ -334,6 +341,26 @@ class MySqlTaskStateStoreTest {
     }
 
     @Test
+    void readToolCanResolveDepartmentAndDoctorNamesWithoutInternalIds() {
+        ToolResult result = readToolExecutor.execute(
+                new ToolCall("findAvailableSlots", Map.of(
+                        "departmentName", departmentName,
+                        "doctorName", doctorName,
+                        "appointmentDate", "2026-10-21",
+                        "clinicPeriod", "AFTERNOON")),
+                store.load(taskId).snapshot());
+
+        assertThat(result.success()).isTrue();
+        assertThat(result.data().get("count")).isEqualTo(1);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> slot = ((java.util.List<Map<String, Object>>) result.data().get("slots"))
+                .get(0);
+        assertThat(slot).containsEntry("departmentId", departmentId)
+                .containsEntry("doctorId", doctorId)
+                .containsEntry("departmentName", departmentName);
+    }
+
+    @Test
     void readToolRejectsInvalidArgumentsWithoutRunningUnsafeSql() {
         ToolResult result = readToolExecutor.execute(
                 new ToolCall("findAvailableSlots", Map.of("clinicPeriod", "night")),
@@ -341,6 +368,45 @@ class MySqlTaskStateStoreTest {
 
         assertThat(result.success()).isFalse();
         assertThat(result.errorCode()).isEqualTo("INVALID_TOOL_ARGUMENT");
+    }
+
+    @Test
+    void readToolAcceptsChineseDateAndPeriodWithoutAskingPatientForFormats() {
+        ToolResult result = readToolExecutor.execute(new ToolCall("findAvailableSlots", Map.of(
+                "departmentId", departmentId, "appointmentDate", "10月21号", "clinicPeriod", "下午")),
+                store.load(taskId).snapshot());
+
+        assertThat(result.success()).isTrue();
+        assertThat(result.data().get("count")).isEqualTo(1);
+        assertThat(result.data().get("exactMatch")).isEqualTo(true);
+    }
+
+    @Test
+    void noExactSlotReturnsSameDepartmentAlternativesAndExplainsChangedPreferences() {
+        ToolResult result = readToolExecutor.execute(new ToolCall("findAvailableSlots", Map.of(
+                "departmentId", departmentId, "appointmentDate", "2026-10-20", "clinicPeriod", "MORNING")),
+                store.load(taskId).snapshot());
+
+        assertThat(result.success()).isTrue();
+        assertThat(result.data().get("exactMatch")).isEqualTo(false);
+        assertThat(result.data().get("requestedDate")).isEqualTo("2026-10-20");
+        assertThat(result.data().get("requestedPeriod")).isEqualTo("MORNING");
+        @SuppressWarnings("unchecked")
+        var slots = (java.util.List<Map<String, Object>>) result.data().get("slots");
+        assertThat(slots).hasSize(1);
+        assertThat(slots.get(0)).containsEntry("slotId", slotId).containsEntry("departmentId", departmentId)
+                .containsEntry("appointmentDate", "2026-10-21").containsEntry("clinicPeriod", "AFTERNOON");
+    }
+
+    @Test
+    void readToolNeverRecommendsPastSlotsForEarliestRequest() {
+        ToolResult result = readToolExecutor.execute(new ToolCall("findAvailableSlots", Map.of(
+                "departmentId", departmentId)), store.load(taskId).snapshot());
+        assertThat(result.success()).isTrue();
+        @SuppressWarnings("unchecked")
+        var slots = (java.util.List<Map<String, Object>>) result.data().get("slots");
+        assertThat(slots).allSatisfy(slot -> assertThat(LocalDate.parse((String) slot.get("appointmentDate")))
+                .isAfterOrEqualTo(LocalDate.now(java.time.ZoneId.of("Asia/Shanghai"))));
     }
 
     @Test
@@ -371,6 +437,21 @@ class MySqlTaskStateStoreTest {
     }
 
     @Test
+    void changingPendingPlanPersistsInvalidationAndRejectsOldConfirmation() {
+        AgentRuntime agent = runtime(model(new AgentDecision.ProposePlan(futurePlan(slotId), "请核对"),
+                new AgentDecision.ProposePlan(futurePlan(slotId), "请核对调整后的方案")));
+        AppointmentPlan oldPlan = agent.handleMessage(taskId, principal, "预约")
+                .task().activePlan().orElseThrow();
+        agent.handleMessage(taskId, principal, "改成下午");
+
+        assertThat(mapper.findPlan(mapper.findTask(taskId.value()).id(), oldPlan.version()).status())
+                .isEqualTo("INVALIDATED");
+        assertThat(store.load(taskId).activePlan().version()).isEqualTo(oldPlan.version() + 1);
+        assertThat(agent.confirmPlan(taskId, principal, oldPlan.id(), oldPlan.version(), "stale-plan").success())
+                .isFalse();
+    }
+
+    @Test
     void httpApiCompletesDemoAppointmentAndReplaysSseEvents() throws Exception {
         String created = mockMvc.perform(post("/api/v1/tasks")
                         .header("X-Demo-User-Id", "1001")
@@ -384,7 +465,7 @@ class MySqlTaskStateStoreTest {
         mockMvc.perform(post("/api/v1/tasks/{taskId}/messages", apiTaskId)
                         .header("X-Demo-User-Id", "1001")
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content("{\"message\":\"帮我预约一个号源\"}"))
+                        .content("{\"message\":\"帮我预约心内科的号\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("AWAITING_CONFIRMATION"));
 
@@ -407,6 +488,30 @@ class MySqlTaskStateStoreTest {
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("READ_TOOL_SUCCEEDED")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("STREAM_COMPLETED")));
+    }
+
+    @Test
+    void httpApiStreamsPatientReplyAndReturnsFinalBusinessResult() throws Exception {
+        String created = mockMvc.perform(post("/api/v1/tasks")
+                        .header("X-Demo-User-Id", "1001")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        String apiTaskId = json.readTree(created).get("taskId").asText();
+
+        var streamRequest = mockMvc.perform(post("/api/v1/tasks/{taskId}/messages/stream", apiTaskId)
+                        .header("X-Demo-User-Id", "1001")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .accept(MediaType.TEXT_EVENT_STREAM)
+                        .content("{\"message\":\"我最近头疼，想先看看该挂哪个科室\"}"))
+                .andExpect(request().asyncStarted())
+                .andReturn();
+        mockMvc.perform(asyncDispatch(streamRequest))
+                .andExpect(status().isOk())
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("MESSAGE_DELTA")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("RESULT")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("NEED_MORE_INFO")));
     }
 
     private boolean saveAfterBarrier(TaskContext context, CyclicBarrier start) throws Exception {

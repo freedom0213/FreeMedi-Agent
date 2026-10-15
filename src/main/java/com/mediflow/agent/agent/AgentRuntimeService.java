@@ -5,7 +5,12 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 public final class AgentRuntimeService implements AgentRuntime {
+    private static final Logger logger = LoggerFactory.getLogger(AgentRuntimeService.class);
+
     private final TaskStateStore stateStore;
     private final DecisionModel decisionModel;
     private final ReadToolExecutor toolExecutor;
@@ -32,12 +37,19 @@ public final class AgentRuntimeService implements AgentRuntime {
 
     @Override
     public AgentTurnResult handleMessage(TaskId taskId, Principal principal, String message) {
+        return handleMessage(taskId, principal, message, event -> { });
+    }
+
+    @Override
+    public AgentTurnResult handleMessage(TaskId taskId, Principal principal, String message,
+                                         java.util.function.Consumer<AgentEvent> progress) {
         if (message == null || message.isBlank()) {
             throw new IllegalArgumentException("message must not be blank");
         }
         TaskContext context = stateStore.load(taskId);
         assertOwner(context, principal);
         context.beginTurn(message);
+        context.setRecommendation(null);
         stateStore.save(context);
 
         List<AgentEvent> events = new ArrayList<>();
@@ -49,14 +61,27 @@ public final class AgentRuntimeService implements AgentRuntime {
             AgentDecision decision;
             try {
                 decision = decisionModel.decide(
-                        new DecisionContext(context.snapshot(), message, toolResults), toolExecutor.tools());
+                        new DecisionContext(context.snapshot(), message, toolResults), toolExecutor.tools(), progress);
             } catch (RuntimeException exception) {
-                return failTurn(context, events, "模型决策失败，请稍后重试");
+                Throwable cause = exception;
+                while (cause.getCause() != null && cause.getCause() != cause) {
+                    cause = cause.getCause();
+                }
+                logger.warn("Agent decision failed: taskId={}, exceptionType={}, rootCauseType={}, reason={}",
+                        taskId.value(), exception.getClass().getSimpleName(), cause.getClass().getSimpleName(),
+                        exception instanceof ModelDecisionException failure ? failure.reason() : "PROVIDER_ERROR");
+                if (context.snapshot().status() != TaskStatus.NEED_MORE_INFO) {
+                    context.transitionTo(TaskStatus.NEED_MORE_INFO);
+                }
+                events.add(new AgentEvent("MODEL_RETRY_REQUIRED", "暂时无法完成处理，请重试"));
+                return result("刚才暂时没能完成处理，预约尚未提交。请稍后重试，或继续告诉我您的就诊需求。",
+                        context, events);
             }
             if (decision == null) {
                 return failTurn(context, events, "模型返回了空决策");
             }
             if (decision instanceof AgentDecision.AskUser askUser) {
+                context.setRecommendation(askUser.recommendation());
                 context.transitionTo(TaskStatus.NEED_MORE_INFO);
                 events.add(new AgentEvent("QUESTION_ASKED", askUser.question()));
                 return result(askUser.question(), context, events);
@@ -67,6 +92,7 @@ public final class AgentRuntimeService implements AgentRuntime {
                 }
                 ToolCall call = callReadTool.call();
                 events.add(new AgentEvent("READ_TOOL_STARTED", call.name()));
+                progress.accept(new AgentEvent("READ_TOOL_STARTED", call.name()));
                 int callNo = context.startTool(call);
                 stateStore.save(context);
                 long started = System.nanoTime();
@@ -86,21 +112,39 @@ public final class AgentRuntimeService implements AgentRuntime {
                 toolResults.add(toolResult);
                 context.finishTool(callNo, call, toolResult, (System.nanoTime() - started) / 1_000_000);
                 if (!toolResult.success()) {
+                    // A rejected argument means the patient's wording was not understood, not that the
+                    // task is dead. Keep it retryable so the next turn can ask again instead of
+                    // forcing the patient to start over.
+                    if (isRecoverableToolFailure(toolResult)) {
+                        if (context.snapshot().status() != TaskStatus.NEED_MORE_INFO) {
+                            context.transitionTo(TaskStatus.NEED_MORE_INFO);
+                        }
+                        events.add(new AgentEvent("READ_TOOL_FAILED", toolResult.errorMessage()));
+                        return result("我还需要再确认一下：" + toolResult.errorMessage(), context, events);
+                    }
                     context.transitionTo(TaskStatus.FAILED);
                     events.add(new AgentEvent("READ_TOOL_FAILED", toolResult.errorMessage()));
                     return result("查询失败：" + toolResult.errorMessage(), context, events);
                 }
                 events.add(new AgentEvent("READ_TOOL_SUCCEEDED", call.name()));
+                progress.accept(new AgentEvent("READ_TOOL_SUCCEEDED", call.name()));
                 stateStore.save(context);
                 continue;
             }
             if (decision instanceof AgentDecision.ProposePlan proposePlan) {
+                context.setRecommendation(proposePlan.recommendation());
                 AppointmentPlan plan;
                 try {
                     TaskStatus currentStatus = context.snapshot().status();
                     if (currentStatus == TaskStatus.UNDERSTANDING || currentStatus == TaskStatus.SEARCHING) {
                         context.transitionTo(TaskStatus.PROPOSAL_READY);
                     }
+                    // Preserve the queried slot metadata for the confirmation card if rules were fetched later.
+                    toolResults.stream().filter(toolResult -> toolResult.success()
+                            && toolResult.data().get("slots") instanceof List<?> slots
+                            && slots.stream().anyMatch(value -> value instanceof java.util.Map<?, ?> slot
+                                    && String.valueOf(proposePlan.draft().slotId()).equals(String.valueOf(slot.get("slotId")))))
+                            .reduce((previous, current) -> current).ifPresent(context::setLastToolResult);
                     plan = context.createPlan(proposePlan.draft());
                     context.transitionTo(TaskStatus.AWAITING_CONFIRMATION);
                 } catch (IllegalArgumentException | IllegalStateException exception) {
@@ -209,5 +253,10 @@ public final class AgentRuntimeService implements AgentRuntime {
         if (principal == null || context.snapshot().patientId() != principal.userId()) {
             throw new SecurityException("task does not belong to current user");
         }
+    }
+
+    /** Tool rejections caused by how the patient phrased a request can be corrected in a later turn. */
+    private static boolean isRecoverableToolFailure(ToolResult result) {
+        return "INVALID_TOOL_ARGUMENT".equals(result.errorCode());
     }
 }
