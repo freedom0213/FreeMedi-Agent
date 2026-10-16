@@ -89,11 +89,19 @@ try {
         & mvn -q "-Dmediflow.test.db.url=$testUrl" "-Dmediflow.test.db.username=root" `
             "-Dmediflow.test.db.password=" test
         if ($LASTEXITCODE -ne 0) { throw 'MySQL integration tests failed.' }
-        $reportPath = Join-Path $workspaceRoot 'target\surefire-reports\TEST-com.mediflow.agent.agent.persistence.MySqlTaskStateStoreTest.xml'
-        if (-not (Test-Path -LiteralPath $reportPath)) { throw 'MySQL integration test report was not generated.' }
-        [xml]$report = Get-Content -LiteralPath $reportPath
-        if ([int]$report.testsuite.tests -lt 1 -or [int]$report.testsuite.skipped -gt 0) {
-            throw 'MySQL integration tests did not execute; refusing a false-positive test run.'
+        $integrationClasses = @(
+            'com.mediflow.agent.agent.persistence.MySqlTaskStateStoreTest',
+            'com.mediflow.agent.knowledge.MySqlKnowledgeImportTest'
+        )
+        foreach ($className in $integrationClasses) {
+            $reportPath = Join-Path $workspaceRoot "target\surefire-reports\TEST-$className.xml"
+            if (-not (Test-Path -LiteralPath $reportPath)) {
+                throw "MySQL integration test report was not generated for $className."
+            }
+            [xml]$report = Get-Content -LiteralPath $reportPath
+            if ([int]$report.testsuite.tests -lt 1 -or [int]$report.testsuite.skipped -gt 0) {
+                throw "MySQL integration tests in $className did not execute; refusing a false-positive test run."
+            }
         }
         $succeeded = $true
     } finally { Pop-Location }
