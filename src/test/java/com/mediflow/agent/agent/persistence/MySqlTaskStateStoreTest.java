@@ -14,9 +14,11 @@ import java.io.IOException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayDeque;
 import java.util.Arrays;
+import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
@@ -27,11 +29,16 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mediflow.agent.agent.*;
 import com.mediflow.agent.appointment.AppointmentWriteService;
 import com.mediflow.agent.appointment.MySqlAppointmentApplicationService;
+import com.mediflow.agent.appointment.MySqlHospitalDirectory;
 import com.mediflow.agent.appointment.MySqlReadToolExecutor;
+import com.mediflow.agent.appointment.SlotCriteria;
+import com.mediflow.agent.appointment.SlotQueryService;
+import com.mediflow.agent.appointment.SlotSearch;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -57,6 +64,9 @@ import org.springframework.test.web.servlet.MockMvc;
 @EnabledIfSystemProperty(named = "mediflow.test.db.url", matches = ".+")
 class MySqlTaskStateStoreTest {
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-10-13T00:00:00Z"), ZoneOffset.UTC);
+    /** Slot searches use the real clock, so the fixture clinic must stay ahead of today. */
+    private static final LocalDate FIXTURE_DATE = LocalDate.now(ZoneId.of("Asia/Shanghai")).plusDays(5);
+    private static final String FIXTURE_DAY = FIXTURE_DATE.toString();
 
     @Autowired MySqlTaskStateStore store;
     @Autowired TaskPersistenceMapper mapper;
@@ -68,6 +78,8 @@ class MySqlTaskStateStoreTest {
     @Autowired AppointmentWriteService appointmentWriteService;
     @Autowired DepartmentCatalog departmentCatalog;
     @Autowired MySqlReadToolExecutor readToolExecutor;
+    @Autowired SlotQueryService slotQueryService;
+    @Autowired MySqlHospitalDirectory directory;
     @Autowired MockMvc mockMvc;
     @Autowired AgentRuntime runtime;
 
@@ -112,14 +124,14 @@ class MySqlTaskStateStoreTest {
         doctorId = jdbc.queryForObject("SELECT id FROM doctor WHERE department_id = ?", Long.class, departmentId);
         jdbc.update("""
                 INSERT INTO doctor_schedule(doctor_id, schedule_date, clinic_period, status)
-                VALUES (?, '2026-10-21', 'AFTERNOON', 'OPEN')
-                """, doctorId);
+                VALUES (?, ?, 'AFTERNOON', 'OPEN')
+                """, doctorId, FIXTURE_DATE);
         long scheduleId = jdbc.queryForObject("SELECT id FROM doctor_schedule WHERE doctor_id = ?",
                 Long.class, doctorId);
         jdbc.update("""
                 INSERT INTO appointment_slot(schedule_id, slot_no, start_at, end_at, status)
-                VALUES (?, 1, '2026-10-21 06:00:00', '2026-10-21 06:30:00', 'AVAILABLE')
-                """, scheduleId);
+                VALUES (?, 1, ?, ?, 'AVAILABLE')
+                """, scheduleId, FIXTURE_DAY + " 06:00:00", FIXTURE_DAY + " 06:30:00");
         slotId = jdbc.queryForObject("SELECT id FROM appointment_slot WHERE schedule_id = ?",
                 Long.class, scheduleId);
         taskId = store.create(sessionId, patientId);
@@ -182,8 +194,8 @@ class MySqlTaskStateStoreTest {
                 Long.class, slotId);
         jdbc.update("""
                 INSERT INTO appointment_slot(schedule_id, slot_no, start_at, end_at, status)
-                VALUES (?, 2, '2026-10-21 06:30:00', '2026-10-21 07:00:00', 'AVAILABLE')
-                """, scheduleId);
+                VALUES (?, 2, ?, ?, 'AVAILABLE')
+                """, scheduleId, FIXTURE_DAY + " 06:30:00", FIXTURE_DAY + " 07:00:00");
         long otherSlotId = jdbc.queryForObject(
                 "SELECT id FROM appointment_slot WHERE schedule_id = ? AND slot_no = 2", Long.class, scheduleId);
         AppointmentWriteService.Actor actor = new AppointmentWriteService.Actor(patientId, "PATIENT");
@@ -230,6 +242,91 @@ class MySqlTaskStateStoreTest {
         Map<?, ?> recommendation = (Map<?, ?>) store.load(taskId).snapshot().facts().get("triageRecommendation");
         assertThat(recommendation).isNotNull();
         assertThat(((Number) recommendation.get("departmentId")).longValue()).isZero();
+    }
+
+    @Test
+    void strictSlotSearchNeverSubstitutesAnotherDateOrPeriod() {
+        SlotSearch exact = slotQueryService.searchStrict(
+                new SlotCriteria(departmentId, null, null, null, FIXTURE_DATE, "AFTERNOON", 20));
+        assertThat(exact.slots()).hasSize(1);
+        assertThat(exact.exactMatch()).isTrue();
+
+        // The fixture publishes no morning clinic, so a morning request must come back empty.
+        SlotSearch strictMorning = slotQueryService.searchStrict(
+                new SlotCriteria(departmentId, null, null, null, FIXTURE_DATE, "MORNING", 20));
+        assertThat(strictMorning.slots()).isEmpty();
+        assertThat(strictMorning.exactMatch()).isTrue();
+
+        // Only the agent path may fall back, and it must say the result is not an exact match.
+        SlotSearch relaxed = slotQueryService.searchWithFallback(
+                new SlotCriteria(departmentId, null, null, null, FIXTURE_DATE, "MORNING", 20));
+        assertThat(relaxed.slots()).isNotEmpty();
+        assertThat(relaxed.exactMatch()).isFalse();
+    }
+
+    @Test
+    void directoryOnlyPublishesActiveDepartmentsAndDoctors() {
+        String disabledDepartment = "停用科室-" + patientId;
+        jdbc.update("INSERT INTO department(code, name, status) VALUES (?, ?, 'DISABLED')",
+                "DISABLED-" + patientId, disabledDepartment);
+        long disabledDepartmentId = jdbc.queryForObject(
+                "SELECT id FROM department WHERE name = ?", Long.class, disabledDepartment);
+        jdbc.update("""
+                INSERT INTO doctor(department_id, name, title, status)
+                VALUES (?, ?, '主治医师', 'DISABLED')
+                """, departmentId, "停用医生-" + patientId);
+
+        assertThat(directory.listActiveDepartments())
+                .anyMatch(view -> view.id() == departmentId)
+                .noneMatch(view -> disabledDepartment.equals(view.name()));
+        assertThat(directory.listActiveDepartments())
+                .noneMatch(view -> view.id() == disabledDepartmentId);
+        assertThat(directory.listActiveDoctors(disabledDepartmentId)).isEmpty();
+        assertThat(directory.listActiveDoctors(departmentId))
+                .anyMatch(view -> doctorName.equals(view.name()))
+                .noneMatch(view -> view.name().startsWith("停用医生-"));
+    }
+
+    @Test
+    void httpCatalogEndpointsBrowseTheDirectoryAndSearchSlotsStrictly() throws Exception {
+        List<Map<String, Object>> departments = json.readValue(
+                mockMvc.perform(get("/api/v1/departments")).andExpect(status().isOk())
+                        .andReturn().getResponse().getContentAsString(),
+                new TypeReference<>() { });
+        assertThat(departments).anyMatch(view -> departmentName.equals(view.get("name")));
+
+        List<Map<String, Object>> doctors = json.readValue(
+                mockMvc.perform(get("/api/v1/departments/" + departmentId + "/doctors"))
+                        .andExpect(status().isOk())
+                        .andReturn().getResponse().getContentAsString(),
+                new TypeReference<>() { });
+        assertThat(doctors).anyMatch(view -> doctorName.equals(view.get("name")));
+
+        Map<String, Object> matched = json.readValue(
+                mockMvc.perform(get("/api/v1/slots")
+                                .param("departmentId", String.valueOf(departmentId))
+                                .param("date", FIXTURE_DAY)
+                                .param("period", "afternoon"))
+                        .andExpect(status().isOk())
+                        .andReturn().getResponse().getContentAsString(),
+                new TypeReference<>() { });
+        assertThat(matched.get("count")).isEqualTo(1);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> matchedSlots = (List<Map<String, Object>>) matched.get("slots");
+        assertThat(matchedSlots.get(0).get("timeRange")).isEqualTo("14:00-14:30");
+        assertThat(((Number) matchedSlots.get(0).get("doctorId")).longValue()).isEqualTo(doctorId);
+
+        // A period with no clinic is answered with nothing rather than a substitute.
+        mockMvc.perform(get("/api/v1/slots")
+                        .param("departmentId", String.valueOf(departmentId))
+                        .param("date", FIXTURE_DAY)
+                        .param("period", "MORNING"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.count").value(0));
+
+        // Browsing without a destination is refused instead of dumping arbitrary slots.
+        mockMvc.perform(get("/api/v1/slots"))
+                .andExpect(status().isBadRequest());
     }
 
     private static int availableMigrationCount() {
@@ -435,7 +532,7 @@ class MySqlTaskStateStoreTest {
         ToolResult result = readToolExecutor.execute(
                 new ToolCall("findAvailableSlots", Map.of(
                         "departmentId", departmentId,
-                        "appointmentDate", "2026-10-21",
+                        "appointmentDate", FIXTURE_DAY,
                         "clinicPeriod", "afternoon")),
                 store.load(taskId).snapshot());
 
@@ -458,7 +555,7 @@ class MySqlTaskStateStoreTest {
                 new ToolCall("findAvailableSlots", Map.of(
                         "departmentName", departmentName,
                         "doctorName", doctorName,
-                        "appointmentDate", "2026-10-21",
+                        "appointmentDate", FIXTURE_DAY,
                         "clinicPeriod", "AFTERNOON")),
                 store.load(taskId).snapshot());
 
@@ -507,7 +604,7 @@ class MySqlTaskStateStoreTest {
         var slots = (java.util.List<Map<String, Object>>) result.data().get("slots");
         assertThat(slots).hasSize(1);
         assertThat(slots.get(0)).containsEntry("slotId", slotId).containsEntry("departmentId", departmentId)
-                .containsEntry("appointmentDate", "2026-10-21").containsEntry("clinicPeriod", "AFTERNOON");
+                .containsEntry("appointmentDate", FIXTURE_DAY).containsEntry("clinicPeriod", "AFTERNOON");
     }
 
     @Test
@@ -537,7 +634,7 @@ class MySqlTaskStateStoreTest {
                 model(
                         new AgentDecision.CallReadTool(new ToolCall("findAvailableSlots", Map.of(
                                 "departmentId", departmentId,
-                                "appointmentDate", "2026-10-21"))),
+                                "appointmentDate", FIXTURE_DAY))),
                         new AgentDecision.ProposePlan(futurePlan(slotId), "已找到可用号源，请确认")),
                 readToolExecutor, new InMemoryAppointmentApplicationService(), 5, CLOCK);
 
