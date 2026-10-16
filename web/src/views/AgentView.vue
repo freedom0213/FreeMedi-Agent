@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, ArrowRight, Check, CircleCheck, CircleHelp, HeartPulse, LoaderCircle, RefreshCw, Send, ShieldCheck, Sparkles, Stethoscope } from 'lucide-vue-next'
 import { ElMessage } from 'element-plus'
 import AppShell from '../components/AppShell.vue'
-import { errorMessage } from '../api/agent'
+import { errorMessage } from '../api/http'
 import { useAgentStore } from '../stores/agent'
 import type { TaskStatus } from '../types/agent'
 

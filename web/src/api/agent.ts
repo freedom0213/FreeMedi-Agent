@@ -1,11 +1,5 @@
-import axios from 'axios'
 import type { AgentResult, TaskCreated, TaskSnapshot } from '../types/agent'
-
-const http = axios.create({
-  baseURL: '/api/v1',
-  timeout: 120_000,
-  headers: { 'Content-Type': 'application/json' },
-})
+import { http } from './http'
 
 export async function createTask(title: string): Promise<TaskCreated> {
   const { data } = await http.post<TaskCreated>('/tasks', { title })
@@ -106,14 +100,4 @@ export function replayEvents(taskId: string, onEvent: (event: { type: string; su
   }
   source.onerror = () => source.close()
   return () => source.close()
-}
-
-export function errorMessage(error: unknown): string {
-  if (axios.isAxiosError(error)) {
-    const message = error.response?.data?.message
-    if (typeof message === 'string' && message.trim()) return message
-    if (error.code === 'ECONNABORTED') return '请求等待时间较长，请确认后端服务仍在运行。'
-    if (!error.response) return '暂时无法连接服务，请确认后端已启动并完成数据库初始化。'
-  }
-  return '请求失败，请稍后重试。'
 }

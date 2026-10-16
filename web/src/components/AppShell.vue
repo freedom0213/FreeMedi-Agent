@@ -8,8 +8,8 @@ const menuOpen = ref(false)
 const navItems = [
   { label: '首页', to: '/', ready: true },
   { label: '智能导诊', to: '/guide', ready: true },
-  { label: '预约挂号', to: '/booking', ready: false },
-  { label: '我的预约', to: '/appointments', ready: false },
+  { label: '预约挂号', to: '/booking', ready: true },
+  { label: '我的预约', to: '/appointments', ready: true },
 ]
 </script>
 
