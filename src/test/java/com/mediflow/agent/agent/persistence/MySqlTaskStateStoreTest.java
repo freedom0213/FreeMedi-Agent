@@ -10,6 +10,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import java.io.IOException;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -28,6 +29,7 @@ import java.util.concurrent.Future;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mediflow.agent.agent.*;
+import com.mediflow.agent.appointment.AppointmentWriteService;
 import com.mediflow.agent.appointment.MySqlAppointmentApplicationService;
 import com.mediflow.agent.appointment.MySqlReadToolExecutor;
 import org.flywaydb.core.Flyway;
@@ -37,6 +39,7 @@ import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -62,6 +65,7 @@ class MySqlTaskStateStoreTest {
     @Autowired JdbcTemplate jdbc;
     @Autowired Flyway flyway;
     @Autowired MySqlAppointmentApplicationService appointmentService;
+    @Autowired AppointmentWriteService appointmentWriteService;
     @Autowired MySqlReadToolExecutor readToolExecutor;
     @Autowired MockMvc mockMvc;
     @Autowired AgentRuntime runtime;
@@ -124,9 +128,85 @@ class MySqlTaskStateStoreTest {
     @Test
     void migrationsCanBeValidatedAndReappliedWithoutChanges() {
         flyway.validate();
-        assertThat(flyway.info().applied()).hasSize(5);
+        // Derived from the migration resources so adding a migration cannot silently pass here.
+        assertThat(flyway.info().applied()).hasSize(availableMigrationCount());
         assertThat(flyway.migrate().migrationsExecuted).isZero();
         assertThat(jdbc.queryForObject("SELECT @@session.time_zone", String.class)).isEqualTo("+00:00");
+    }
+
+    @Test
+    void portalBookingSkipsAgentPlanAndRecordsItsSource() {
+        AppointmentWriteService.Actor actor = new AppointmentWriteService.Actor(patientId, "PATIENT");
+        AppointmentWriteService.BookingCommand command =
+                AppointmentWriteService.BookingCommand.forSlot(actor, "portal-idem-1", slotId);
+
+        AppointmentWriteService.BookingResult booked = appointmentWriteService.book(command);
+
+        assertThat(booked.success()).isTrue();
+        assertThat(booked.outcome()).isEqualTo(AppointmentWriteService.BookingResult.Outcome.CREATED);
+        assertThat(jdbc.queryForObject("""
+                SELECT COUNT(*) FROM appointment
+                WHERE patient_id = ? AND plan_id IS NULL AND booked_via = 'PORTAL' AND confirmed_version = 0
+                """, Long.class, patientId)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM appointment_slot WHERE id = ?", String.class, slotId))
+                .isEqualTo("RESERVED");
+        assertThat(jdbc.queryForObject(
+                "SELECT COUNT(*) FROM operation_audit_log WHERE patient_id = ? AND plan_id IS NULL",
+                Long.class, patientId)).isEqualTo(1);
+
+        AppointmentWriteService.BookingResult repeated = appointmentWriteService.book(command);
+        assertThat(repeated.outcome()).isEqualTo(AppointmentWriteService.BookingResult.Outcome.EXISTING);
+        assertThat(repeated.appointmentNo()).isEqualTo(booked.appointmentNo());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?", Long.class,
+                patientId)).isEqualTo(1);
+    }
+
+    @Test
+    void portalBookingRefusesAnUnavailableSlotWithoutWritingAnything() {
+        jdbc.update("UPDATE appointment_slot SET status = 'RESERVED' WHERE id = ?", slotId);
+
+        AppointmentWriteService.BookingResult result = appointmentWriteService.book(
+                AppointmentWriteService.BookingCommand.forSlot(
+                        new AppointmentWriteService.Actor(patientId, "PATIENT"), "portal-idem-2", slotId));
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.code()).isEqualTo("SLOT_UNAVAILABLE");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?", Long.class,
+                patientId)).isZero();
+    }
+
+    @Test
+    void portalBookingRefusesToReuseAnIdempotencyKeyForAnotherSlot() {
+        long scheduleId = jdbc.queryForObject("SELECT schedule_id FROM appointment_slot WHERE id = ?",
+                Long.class, slotId);
+        jdbc.update("""
+                INSERT INTO appointment_slot(schedule_id, slot_no, start_at, end_at, status)
+                VALUES (?, 2, '2026-10-21 06:30:00', '2026-10-21 07:00:00', 'AVAILABLE')
+                """, scheduleId);
+        long otherSlotId = jdbc.queryForObject(
+                "SELECT id FROM appointment_slot WHERE schedule_id = ? AND slot_no = 2", Long.class, scheduleId);
+        AppointmentWriteService.Actor actor = new AppointmentWriteService.Actor(patientId, "PATIENT");
+        assertThat(appointmentWriteService.book(AppointmentWriteService.BookingCommand
+                .forSlot(actor, "portal-idem-3", slotId)).success()).isTrue();
+
+        AppointmentWriteService.BookingResult conflict = appointmentWriteService.book(
+                AppointmentWriteService.BookingCommand.forSlot(actor, "portal-idem-3", otherSlotId));
+
+        assertThat(conflict.success()).isFalse();
+        assertThat(conflict.code()).isEqualTo("IDEMPOTENCY_CONFLICT");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?", Long.class,
+                patientId)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM appointment_slot WHERE id = ?", String.class,
+                otherSlotId)).isEqualTo("AVAILABLE");
+    }
+
+    private static int availableMigrationCount() {
+        try {
+            return new PathMatchingResourcePatternResolver()
+                    .getResources("classpath:db/migration/*.sql").length;
+        } catch (IOException exception) {
+            throw new IllegalStateException("could not list migration resources", exception);
+        }
     }
 
     @Test
