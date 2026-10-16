@@ -27,7 +27,9 @@ MySQL 适配器保存任务当前状态、事实 JSON、最新工具结果、对
 - `V1__initial_schema.sql`：用户、医院目录、号源、预约、Agent 任务及审计表；
 - `V2__task_last_tool_result.sql`：为任务增加最新工具结果字段；
 - `V3__seed_demo_data.sql`：写入合成患者、管理员、科室、医生和固定日期排班号源，仅供本地演示；
-- `V4__seed_near_term_demo_slots.sql`、`V5__seed_neurology_and_gastroenterology.sql`：按 `CURRENT_DATE()` 生成迁移当天的未来 1—14 天排班号源，并补充神经内科和消化内科医生。
+- `V4__seed_near_term_demo_slots.sql`、`V5__seed_neurology_and_gastroenterology.sql`：按 `CURRENT_DATE()` 生成迁移当天的未来 1—14 天排班号源，并补充神经内科和消化内科医生；
+- `V6__portal_appointment_source.sql`：允许 `appointment.plan_id` 为空并新增 `booked_via`，使普通挂号不必伪造 Agent 计划；
+- `V7__knowledge_documents_and_chunks.sql`：医院资料的文档与片段表，供后续语义检索使用。
 
 迁移只执行一次，因此 V4/V5 生成的近期待选时间会随时间自然耗尽。需要续期时运行：
 

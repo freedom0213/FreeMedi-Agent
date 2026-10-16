@@ -71,6 +71,8 @@ sys_user 1 ── N appointment N ───────────────�
 | `agent_plan` | 候选方案及确认版本 | 必须 |
 | `agent_state_event` | 任务状态变更历史 | 必须 |
 | `operation_audit_log` | 预约写操作审计 | 必须 |
+| `knowledge_document` | 医院资料的版本化元信息 | M3 |
+| `knowledge_chunk` | 可检索的资料片段与索引状态 | M3 |
 
 表统一使用 `BIGINT` 主键（应用生成或数据库自增二选一，DDL 阶段统一），`created_at`、`updated_at` 使用 UTC 时间。API 层按 `Asia/Shanghai` 展示。所有外键关系至少由索引和业务校验保障；若采用数据库外键，需统一项目约定。
 
@@ -344,6 +346,50 @@ created_at         DATETIME(3) NOT NULL
 
 - **幂等重放不重复记账**。命中既有预约时返回原结果，不产生新的审计行——本次操作没有改变任何状态，重复记账会让"操作次数"无法统计。
 - **被拒与成功的记账事务不同**。业务拒绝是返回值而不是异常，写它的那条事务会正常提交，因此拒绝记录和业务结果天然一致；只有异常路径上的事务必然回滚，需要单独的事务尽力记录，且失败时不得覆盖原始错误（此时应用日志是唯一记录）。
+
+### 5.5 医院资料
+
+#### `knowledge_document`
+
+```text
+id                 BIGINT PK
+doc_no             VARCHAR NOT NULL      -- 资料编号，同一编号可以有多个版本
+title              VARCHAR NOT NULL
+doc_type           VARCHAR NOT NULL      -- APPOINTMENT_RULE / VISIT_NOTICE / DEPARTMENT_INTRO / DOCTOR_PROFILE / PREPARATION
+department_id      BIGINT NULL           -- 科室资料必填，外键 department
+doctor_id          BIGINT NULL           -- 医生资料必填，外键 doctor
+source             VARCHAR NOT NULL      -- 资料来源说明
+version            INT NOT NULL
+status             VARCHAR NOT NULL      -- DRAFT / PUBLISHED / ARCHIVED
+content_hash       CHAR(64) NOT NULL     -- 覆盖元信息与正文，用于判断是否需要升版本
+published_at       DATETIME(3) NULL
+```
+
+唯一约束 `(doc_no, version)`。
+
+#### `knowledge_chunk`
+
+```text
+id                 BIGINT PK
+document_id        BIGINT NOT NULL       -- 外键 knowledge_document
+version            INT NOT NULL
+chunk_no           INT NOT NULL          -- 从 1 开始
+heading            VARCHAR NULL          -- 所属标题路径，如「预约规则 > 取消与改约」
+content            TEXT NOT NULL         -- 原文片段，患者看到的引用正文
+char_count         INT NOT NULL
+embedding_status   VARCHAR NOT NULL      -- PENDING / INDEXED / FAILED
+index_error        VARCHAR NULL
+indexed_at         DATETIME(3) NULL
+```
+
+唯一约束 `(document_id, version, chunk_no)`。
+
+四条设计约束：
+
+- **MySQL 是资料的事实来源，向量库只是可重建的索引。** 片段原文、版本和发布状态都在这里；索引整库丢失应当能从这里重建，不丢任何业务数据。
+- **版本进唯一键**，因为更新或下架后不能继续返回旧版本：检索按 `documentId + version + status = PUBLISHED` 过滤，重新索引时删除被取代的向量点。
+- **`heading` 是元信息，不掺进 `content`。** 片段正文保持为原文的忠实片段，引用要把它展示给患者；嵌入时使用哪些文本由索引层决定。
+- **`embedding_status` 承载重试。** 单个片段索引失败可以重试，不需要重建已经成功的片段。
 
 ## 6. 事务和并发规则
 
