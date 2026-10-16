@@ -6,6 +6,7 @@ import com.mediflow.agent.agent.AgentRuntime;
 import com.mediflow.agent.agent.AgentRuntimeService;
 import com.mediflow.agent.agent.AppointmentApplicationService;
 import com.mediflow.agent.agent.DecisionModel;
+import com.mediflow.agent.agent.DepartmentCatalog;
 import com.mediflow.agent.agent.ReadToolExecutor;
 import com.mediflow.agent.agent.StreamingReplyService;
 import com.mediflow.agent.agent.TaskStateStore;
@@ -86,9 +87,10 @@ public class AgentRuntimeConfiguration {
     AgentRuntime agentRuntime(TaskStateStore stateStore, DecisionModel decisionModel,
                              ReadToolExecutor toolExecutor,
                              AppointmentApplicationService appointmentService,
+                             DepartmentCatalog departmentCatalog,
                              Clock agentClock,
                              @Value("${mediflow.agent.max-steps:8}") int maxSteps) {
         return new AgentRuntimeService(stateStore, decisionModel, toolExecutor,
-                appointmentService, maxSteps, agentClock);
+                appointmentService, maxSteps, agentClock, departmentCatalog);
     }
 }

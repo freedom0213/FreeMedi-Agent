@@ -17,6 +17,7 @@ public final class AgentRuntimeService implements AgentRuntime {
     private final AppointmentApplicationService appointmentService;
     private final int maxSteps;
     private final Clock clock;
+    private final DepartmentCatalog departmentCatalog;
 
     public AgentRuntimeService(TaskStateStore stateStore,
                                DecisionModel decisionModel,
@@ -24,6 +25,16 @@ public final class AgentRuntimeService implements AgentRuntime {
                                AppointmentApplicationService appointmentService,
                                int maxSteps,
                                Clock clock) {
+        this(stateStore, decisionModel, toolExecutor, appointmentService, maxSteps, clock, name -> 0L);
+    }
+
+    public AgentRuntimeService(TaskStateStore stateStore,
+                               DecisionModel decisionModel,
+                               ReadToolExecutor toolExecutor,
+                               AppointmentApplicationService appointmentService,
+                               int maxSteps,
+                               Clock clock,
+                               DepartmentCatalog departmentCatalog) {
         if (maxSteps <= 0) {
             throw new IllegalArgumentException("max steps must be positive");
         }
@@ -33,6 +44,7 @@ public final class AgentRuntimeService implements AgentRuntime {
         this.appointmentService = appointmentService;
         this.maxSteps = maxSteps;
         this.clock = clock;
+        this.departmentCatalog = departmentCatalog;
     }
 
     @Override
@@ -81,7 +93,7 @@ public final class AgentRuntimeService implements AgentRuntime {
                 return failTurn(context, events, "模型返回了空决策");
             }
             if (decision instanceof AgentDecision.AskUser askUser) {
-                context.setRecommendation(askUser.recommendation());
+                context.setRecommendation(resolveRecommendation(askUser.recommendation()));
                 context.transitionTo(TaskStatus.NEED_MORE_INFO);
                 events.add(new AgentEvent("QUESTION_ASKED", askUser.question()));
                 return result(askUser.question(), context, events);
@@ -132,7 +144,7 @@ public final class AgentRuntimeService implements AgentRuntime {
                 continue;
             }
             if (decision instanceof AgentDecision.ProposePlan proposePlan) {
-                context.setRecommendation(proposePlan.recommendation());
+                context.setRecommendation(resolveRecommendation(proposePlan.recommendation()));
                 AppointmentPlan plan;
                 try {
                     TaskStatus currentStatus = context.snapshot().status();
@@ -258,5 +270,20 @@ public final class AgentRuntimeService implements AgentRuntime {
     /** Tool rejections caused by how the patient phrased a request can be corrected in a later turn. */
     private static boolean isRecoverableToolFailure(ToolResult result) {
         return "INVALID_TOOL_ARGUMENT".equals(result.errorCode());
+    }
+
+    /**
+     * Fills in a real department id when the catalog knows the recommended department. A direction
+     * this hospital does not offer keeps id 0, which the interface reads as "not in the catalog"
+     * rather than as an id that points at nothing.
+     */
+    private TriageRecommendation resolveRecommendation(TriageRecommendation recommendation) {
+        if (recommendation == null || recommendation.departmentId() > 0) {
+            return recommendation;
+        }
+        long resolved = departmentCatalog.findActiveDepartmentId(recommendation.departmentName());
+        return resolved > 0
+                ? new TriageRecommendation(resolved, recommendation.departmentName(), recommendation.reason())
+                : recommendation;
     }
 }

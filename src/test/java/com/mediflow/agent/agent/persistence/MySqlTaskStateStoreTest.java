@@ -66,6 +66,7 @@ class MySqlTaskStateStoreTest {
     @Autowired Flyway flyway;
     @Autowired MySqlAppointmentApplicationService appointmentService;
     @Autowired AppointmentWriteService appointmentWriteService;
+    @Autowired DepartmentCatalog departmentCatalog;
     @Autowired MySqlReadToolExecutor readToolExecutor;
     @Autowired MockMvc mockMvc;
     @Autowired AgentRuntime runtime;
@@ -198,6 +199,37 @@ class MySqlTaskStateStoreTest {
                 patientId)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT status FROM appointment_slot WHERE id = ?", String.class,
                 otherSlotId)).isEqualTo("AVAILABLE");
+    }
+
+    @Test
+    void triageRecommendationIsPersistedWithTheRealDepartmentId() {
+        AgentRuntimeService catalogRuntime = new AgentRuntimeService(store,
+                model(new AgentDecision.AskUser("您哪里不舒服？", Set.of(),
+                        new TriageRecommendation(0, departmentName, "根据描述先由该科室了解情况"))),
+                new InMemoryReadToolExecutor(), new InMemoryAppointmentApplicationService(),
+                5, CLOCK, departmentCatalog);
+
+        catalogRuntime.handleMessage(taskId, principal, "我最近老是头痛");
+
+        Map<?, ?> recommendation = (Map<?, ?>) store.load(taskId).snapshot().facts().get("triageRecommendation");
+        assertThat(recommendation).isNotNull();
+        assertThat(((Number) recommendation.get("departmentId")).longValue()).isEqualTo(departmentId);
+        assertThat(recommendation.get("departmentName")).isEqualTo(departmentName);
+    }
+
+    @Test
+    void triageRecommendationKeepsZeroWhenTheCatalogHasNoSuchDepartment() {
+        AgentRuntimeService catalogRuntime = new AgentRuntimeService(store,
+                model(new AgentDecision.AskUser("您哪里不舒服？", Set.of(),
+                        new TriageRecommendation(0, "本院未开设的科室-" + patientId, "仅供演示"))),
+                new InMemoryReadToolExecutor(), new InMemoryAppointmentApplicationService(),
+                5, CLOCK, departmentCatalog);
+
+        catalogRuntime.handleMessage(taskId, principal, "我最近老是头痛");
+
+        Map<?, ?> recommendation = (Map<?, ?>) store.load(taskId).snapshot().facts().get("triageRecommendation");
+        assertThat(recommendation).isNotNull();
+        assertThat(((Number) recommendation.get("departmentId")).longValue()).isZero();
     }
 
     private static int availableMigrationCount() {
