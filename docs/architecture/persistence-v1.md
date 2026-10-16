@@ -59,6 +59,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test-mysql.ps1
 
 `MySqlReadToolExecutor` 在同一 Profile 下提供 `findAvailableSlots` 和 `getAppointmentRules` 两个只读工具。号源查询只读取 `AVAILABLE`、开放排班和启用中的科室/医生，使用参数化筛选和结果上限；工具结果可以直接作为下一轮模型决策上下文，但不会执行预约写入。
 
+## 向量索引（M3）
+
+医院资料的正文、版本与发布状态都在 MySQL（V7 的 `knowledge_document` / `knowledge_chunk`），**Qdrant 只保存可重建的向量索引**：每个点是一个片段的向量加上 `status`、`model`、`doc_type`、`document_id`、`version`、`department_id`、`doctor_id` 七个字段，**不含正文，也不含任何号源字段**。
+
+由此得到两条实现约束：
+
+- 检索时索引只提供候选片段 id，最终判据是**回读 MySQL**（按 `chunk.version = document.version` 联接并要求 `PUBLISHED`）。因此下架立刻生效，即使索引里还留着旧版本的向量。
+- 索引整库丢失不是数据丢失：`scripts/index-knowledge.ps1` 按待索引片段重新生成向量，`-Rebuild` 则先清空索引再整体重建。
+
+Qdrant 由 `docker-compose.yml` 启动（只放这一个服务，MySQL 与 Redis 仍用本机既有服务）。集合名带上模型标识（`mediflow_knowledge__bge_small_zh_v1_5_q`），因为 Qdrant 的集合建成后维度不可更改，而不同模型的向量不可比较——换模型必然换集合，重建之前检索会明确报"索引尚未建立"。
+
+索引与导入是两条独立命令：`scripts/import-knowledge.ps1` 只做文本入库（不需要模型，也不需要容器），`scripts/index-knowledge.ps1` 才需要 Embedding 与向量库。
+
 ## API 与 SSE 演示边界
 
 `mysql` Profile 下提供以下最小接口：

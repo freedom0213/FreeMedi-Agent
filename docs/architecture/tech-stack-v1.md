@@ -81,9 +81,13 @@ RAG 不阻塞 P0/P1 预约闭环。进入 P2 后采用：
 | Rerank | BGE-reranker-v2-m3 | 只在检索质量需要时启用，且必须先有测量 |
 | 文档内容 | 医院预约规则、就诊须知、服务说明 | 不放实时号源和患者隐私 |
 
-Qdrant 只有在 P2 需要 RAG 时才加入 Docker Compose。首版不额外部署 Elasticsearch、Milvus 或 PostgreSQL，避免基础设施重复。
+Qdrant 在 M3 加入 Docker Compose（`docker-compose.yml` 只放它一个服务；MySQL 与 Redis 仍用本机既有服务，避免两个竞争的业务库）。首版不额外部署 Elasticsearch、Milvus 或 PostgreSQL。
 
-**换 Embedding 模型等于换索引**：向量维度由配置声明，两种模型不得混入同一个集合；切换后必须整体重建索引。这一点由 `TextEmbedder` 端口的 `name()` / `dimensions()` 承载，不是约定而是代码约束。
+**Qdrant 客户端直接用 REST API 实现**，没有引入 `langchain4j-qdrant`：该模块是 `EmbeddingStore<TextSegment>` 抽象，会把片段正文写进 payload（与"索引不存正文"冲突），也没有"按版本删除""点数统计""集合生命周期"三个必需能力，并会额外带进 gRPC + guava + netty。以上结论来自 `javap` 核对该模块 API，不是推测。
+
+**集合按模型命名**（`{配置名}__{规范化模型名}`）：Qdrant 集合建成后维度不可更改，而不同模型的向量又不可比较，所以让两个模型在结构上无法共用一个集合。
+
+**换 Embedding 模型等于换索引**：向量维度由配置声明，两种模型不得混入同一个集合；切换后必须整体重建索引。这一点由 `TextEmbedder` 端口的 `name()` / `dimensions()` 承载，并由 `QdrantKnowledgeIndex` 在集合命名与建维时强制，不是约定而是代码约束。重建用 `scripts/index-knowledge.ps1 -Rebuild`。
 
 ## 4. 关键取舍
 
