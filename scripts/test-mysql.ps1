@@ -38,6 +38,24 @@ $previousUrl = [Environment]::GetEnvironmentVariable('MEDIFLOW_TEST_DB_URL', 'Pr
 $previousUser = [Environment]::GetEnvironmentVariable('MEDIFLOW_TEST_DB_USERNAME', 'Process')
 $previousPassword = [Environment]::GetEnvironmentVariable('MEDIFLOW_TEST_DB_PASSWORD', 'Process')
 
+# Windows environment variable names are case-insensitive, but the process environment can still
+# hold both HTTP_PROXY and http_proxy. Start-Process then fails with "an item with the same key has
+# already been added" before it can launch the child, which is how a developer machine ends up
+# unable to run this script at all. Drop the lower-case spellings for this run and restore them
+# afterwards; the isolated server and Maven both talk to 127.0.0.1 and need no proxy.
+$proxyNames = @('http_proxy', 'https_proxy', 'all_proxy', 'no_proxy')
+$savedProxies = @{}
+foreach ($proxyName in $proxyNames) {
+    $proxyValue = [Environment]::GetEnvironmentVariable($proxyName, 'Process')
+    if ($null -ne $proxyValue) {
+        $savedProxies[$proxyName] = $proxyValue
+        [Environment]::SetEnvironmentVariable($proxyName, $null, 'Process')
+    }
+}
+if ($savedProxies.Count -gt 0) {
+    Write-Host ("Normalised $($savedProxies.Count) lower-case proxy variable(s) for this run.")
+}
+
 try {
     & $serverExe --no-defaults "--basedir=$baseDirectory" "--datadir=$dataDirectory" --initialize-insecure --console
     if ($LASTEXITCODE -ne 0) { throw 'Isolated MySQL initialization failed.' }
@@ -83,6 +101,9 @@ try {
     [Environment]::SetEnvironmentVariable('MEDIFLOW_TEST_DB_URL', $previousUrl, 'Process')
     [Environment]::SetEnvironmentVariable('MEDIFLOW_TEST_DB_USERNAME', $previousUser, 'Process')
     [Environment]::SetEnvironmentVariable('MEDIFLOW_TEST_DB_PASSWORD', $previousPassword, 'Process')
+    foreach ($proxyName in $savedProxies.Keys) {
+        [Environment]::SetEnvironmentVariable($proxyName, $savedProxies[$proxyName], 'Process')
+    }
     if ($null -ne $testServer) {
         $testServer.Refresh()
         if (-not $testServer.HasExited) {
