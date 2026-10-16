@@ -86,24 +86,56 @@ try {
     Push-Location $workspaceRoot
     try {
         $testUrl = "jdbc:mysql://127.0.0.1:$Port/mediflow_test?connectionTimeZone=UTC"
+        $reportDirectory = Join-Path $workspaceRoot 'target\surefire-reports'
+        $runStarted = [DateTime]::UtcNow
+        # The Qdrant adapter's tests need a vector store, not MySQL. They are excluded so this run
+        # reports the offline suite exactly, with no skipped class mixed in; scripts/test-qdrant.ps1
+        # runs them against a real server.
         & mvn -q "-Dmediflow.test.db.url=$testUrl" "-Dmediflow.test.db.username=root" `
-            "-Dmediflow.test.db.password=" test
+            "-Dmediflow.test.db.password=" '-Dtest=!com.mediflow.agent.knowledge.QdrantKnowledgeIndexTest' test
         if ($LASTEXITCODE -ne 0) { throw 'MySQL integration tests failed.' }
+
+        # Surefire leaves reports from earlier runs behind. A stale one would let a check below pass for
+        # a class that never executed, so reports are selected by write time. Deleting them is avoided:
+        # a machine whose recycle bin is unavailable refuses to delete at all.
+        $freshReports = @(Get-ChildItem -LiteralPath $reportDirectory -Filter 'TEST-*.xml' -File |
+            Where-Object { $_.LastWriteTimeUtc -ge $runStarted.AddSeconds(-2) })
+        if ($freshReports.Count -lt 1) {
+            throw 'No test report was produced by this run.'
+        }
+        $totalTests = 0
+        $totalSkipped = 0
+        foreach ($freshReport in $freshReports) {
+            [xml]$parsed = Get-Content -LiteralPath $freshReport.FullName
+            $totalTests += [int]$parsed.testsuite.tests
+            $totalSkipped += [int]$parsed.testsuite.skipped
+            if ([int]$parsed.testsuite.tests -gt 0 -and [int]$parsed.testsuite.skipped -gt 0) {
+                $name = $freshReport.Name -replace '^TEST-|\.xml$', ''
+                throw "$name reported $($parsed.testsuite.skipped) skipped test(s); this run is supposed to execute everything it selects."
+            }
+        }
+
         $integrationClasses = @(
             'com.mediflow.agent.agent.persistence.MySqlTaskStateStoreTest',
             'com.mediflow.agent.knowledge.MySqlKnowledgeImportTest',
             'com.mediflow.agent.knowledge.MySqlKnowledgeSearchTest'
         )
         foreach ($className in $integrationClasses) {
-            $reportPath = Join-Path $workspaceRoot "target\surefire-reports\TEST-$className.xml"
+            $reportPath = Join-Path $reportDirectory "TEST-$className.xml"
             if (-not (Test-Path -LiteralPath $reportPath)) {
                 throw "MySQL integration test report was not generated for $className."
+            }
+            $reportFile = Get-Item -LiteralPath $reportPath
+            if ($reportFile.LastWriteTimeUtc -lt $runStarted.AddSeconds(-2)) {
+                throw "The report for $className is left over from an earlier run; the tests did not execute."
             }
             [xml]$report = Get-Content -LiteralPath $reportPath
             if ([int]$report.testsuite.tests -lt 1 -or [int]$report.testsuite.skipped -gt 0) {
                 throw "MySQL integration tests in $className did not execute; refusing a false-positive test run."
             }
         }
+        Write-Host ("Executed $totalTests test(s) in $($freshReports.Count) class(es) with $totalSkipped skipped; " +
+            'the MySQL integration classes all ran against the isolated server.')
         $succeeded = $true
     } finally { Pop-Location }
 } finally {
@@ -131,3 +163,7 @@ try {
         Write-Host "Test data and diagnostics retained under $runDirectory (ignored by Git)."
     }
 }
+
+# Every throw above aborts the script, so reaching this point means the suite passed. Exit explicitly:
+# the last native command is the server shutdown, whose exit code would otherwise become the script's.
+exit 0
