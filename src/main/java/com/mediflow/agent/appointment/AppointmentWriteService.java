@@ -8,11 +8,14 @@ import javax.sql.DataSource;
 
 import com.mediflow.agent.agent.PlanStatus;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Profile;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 
 /**
@@ -29,6 +32,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 @Service
 @Profile("mysql")
 public final class AppointmentWriteService {
+    private static final Logger logger = LoggerFactory.getLogger(AppointmentWriteService.class);
 
     /** Where a booking came from. Recorded on the appointment row and used by audit. */
     public enum Source { AGENT, PORTAL }
@@ -100,17 +104,35 @@ public final class AppointmentWriteService {
 
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
+    /**
+     * Used only when the booking transaction is already rolling back, so the failure record cannot
+     * share it. Best effort: it must never replace the original error.
+     */
+    private final TransactionTemplate failureAuditTransactions;
 
     public AppointmentWriteService(DataSource dataSource, PlatformTransactionManager transactionManager) {
         this.jdbc = new JdbcTemplate(dataSource);
         this.transactions = new TransactionTemplate(transactionManager);
+        this.failureAuditTransactions = new TransactionTemplate(transactionManager);
+        this.failureAuditTransactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
 
+    /**
+     * Runs the booking and records the outcome.
+     *
+     * <p>A business refusal is a normal result, not an error: {@link #bookInTransaction} returns it
+     * and the transaction commits, so a refusal is audited inside that same transaction. Only an
+     * unexpected exception rolls the transaction back, and that path needs its own transaction to be
+     * able to leave a record at all.
+     */
     public BookingResult book(BookingCommand command) {
         try {
             return transactions.execute(status -> bookInTransaction(command));
         } catch (DuplicateKeyException duplicate) {
             return transactions.execute(status -> resolveDuplicate(command, duplicate));
+        } catch (RuntimeException unexpected) {
+            auditUnexpectedFailure(command, unexpected);
+            throw unexpected;
         }
     }
 
@@ -131,22 +153,24 @@ public final class AppointmentWriteService {
         if (command.plan() != null) {
             PlanRow plan = findPlanForUpdate(command);
             if (plan == null) {
-                return BookingResult.failure("PLAN_NOT_FOUND", "预约方案不存在或不属于当前用户");
+                return reject(command, "PLAN_NOT_FOUND", "预约方案不存在或不属于当前用户", null, null);
             }
             BookingResult existing = findExisting(command, plan.id(), null);
             if (existing != null) {
                 return existing;
             }
             if (!PlanStatus.CONFIRMED.name().equals(plan.status())) {
-                return BookingResult.failure("PLAN_NOT_CONFIRMED", "预约方案尚未完成确认");
+                return reject(command, "PLAN_NOT_CONFIRMED", "预约方案尚未完成确认",
+                        plan.id(), plan.slotId());
             }
             if (!plan.expiresAt().isAfter(Instant.now())) {
-                return BookingResult.failure("PLAN_EXPIRED", "预约方案已过期，请重新查询号源");
+                return reject(command, "PLAN_EXPIRED", "预约方案已过期，请重新查询号源",
+                        plan.id(), plan.slotId());
             }
             SlotRow slot = findSlotForUpdate(plan.slotId());
             if (slot == null || slot.doctorId() != plan.doctorId()
                     || slot.departmentId() != plan.departmentId()) {
-                return BookingResult.failure("SLOT_INVALID", "预约方案对应的号源已失效");
+                return reject(command, "SLOT_INVALID", "预约方案对应的号源已失效", plan.id(), plan.slotId());
             }
             return reserveAndWrite(command, slot, plan.id(), plan.version());
         }
@@ -157,23 +181,35 @@ public final class AppointmentWriteService {
         }
         SlotRow slot = findSlotForUpdate(command.slotId());
         if (slot == null) {
-            return BookingResult.failure("SLOT_NOT_FOUND", "号源不存在或已被关闭");
+            return reject(command, "SLOT_NOT_FOUND", "号源不存在或已被关闭", null, command.slotId());
         }
         return reserveAndWrite(command, slot, null, 0);
+    }
+
+    /**
+     * Returns a business refusal and records it, so a patient asking "why did my booking not go
+     * through" can be answered. The record shares the caller's transaction, which commits because a
+     * refusal is a result rather than an exception.
+     */
+    private BookingResult reject(BookingCommand command, String code, String message,
+                                Long planRowId, Long slotId) {
+        insertAudit(command, "REJECTED", code, slotId == null ? "APPOINTMENT" : "APPOINTMENT_SLOT",
+                slotId, planRowId);
+        return BookingResult.failure(code, message);
     }
 
     /** Reserves the already locked slot and writes the appointment inside the caller's transaction. */
     private BookingResult reserveAndWrite(BookingCommand command, SlotRow slot,
                                           Long planRowId, int confirmedVersion) {
         if (!"AVAILABLE".equals(slot.status())) {
-            return BookingResult.failure("SLOT_UNAVAILABLE", "号源已被占用");
+            return reject(command, "SLOT_UNAVAILABLE", "号源已被占用", planRowId, slot.id());
         }
         int reserved = jdbc.update("""
                 UPDATE appointment_slot SET status = 'RESERVED', version = version + 1
                 WHERE id = ? AND status = 'AVAILABLE'
                 """, slot.id());
         if (reserved != 1) {
-            return BookingResult.failure("SLOT_UNAVAILABLE", "号源已被占用");
+            return reject(command, "SLOT_UNAVAILABLE", "号源已被占用", planRowId, slot.id());
         }
 
         String appointmentNo = "APT-" + UUID.randomUUID().toString().replace("-", "").toUpperCase();
@@ -189,15 +225,44 @@ public final class AppointmentWriteService {
             jdbc.update("UPDATE agent_plan SET status = 'EXECUTED' WHERE id = ? AND status = 'CONFIRMED'",
                     planRowId);
         }
+        insertAudit(command, "SUCCEEDED", null, "APPOINTMENT", appointmentId, planRowId);
+        return BookingResult.created(appointmentNo);
+    }
+
+    /**
+     * Writes one audit row. {@code target} names what the operation acted on: the created appointment
+     * on success, or the slot the patient tried to book when the operation was refused.
+     */
+    private void insertAudit(BookingCommand command, String resultStatus, String resultCode,
+                             String targetType, Long targetId, Long planRowId) {
         jdbc.update("""
                 INSERT INTO operation_audit_log(operation_no, patient_id, operator_type, operator_id,
                                                 operation_type, target_type, target_id, plan_id,
                                                 idempotency_key, result_status, result_code)
-                VALUES (?, ?, ?, ?, 'APPOINTMENT_CREATE', 'APPOINTMENT', ?, ?, ?, 'SUCCEEDED', NULL)
+                VALUES (?, ?, ?, ?, 'APPOINTMENT_CREATE', ?, ?, ?, ?, ?, ?)
                 """, "AUD-" + UUID.randomUUID().toString().replace("-", "").toUpperCase(),
                 command.actor().userId(), command.actor().type(), command.actor().userId(),
-                appointmentId, planRowId, command.idempotencyKey());
-        return BookingResult.created(appointmentNo);
+                targetType, targetId, planRowId, command.idempotencyKey(), resultStatus, resultCode);
+    }
+
+    /**
+     * Records an unexpected failure in its own transaction, because the booking transaction is
+     * already rolling back. The record is best effort: a problem while auditing must not replace the
+     * original error the caller needs to see.
+     */
+    private void auditUnexpectedFailure(BookingCommand command, RuntimeException cause) {
+        String target = command.slotId() == null ? "APPOINTMENT" : "APPOINTMENT_SLOT";
+        try {
+            failureAuditTransactions.executeWithoutResult(status -> insertAudit(command,
+                    "FAILED", "INTERNAL_ERROR", target, command.slotId(), null));
+        } catch (RuntimeException auditFailure) {
+            // The audit row shares patient_id and idempotency_key with the appointment row, so a
+            // failure caused by one of those columns cannot be audited either. The application log
+            // is then the only record, which is why it carries the identifying fields.
+            logger.warn("could not record a failed appointment attempt: status=FAILED code=INTERNAL_ERROR "
+                            + "patient={} target={} targetId={} cause={}",
+                    command.actor().userId(), target, command.slotId(), cause.toString(), auditFailure);
+        }
     }
 
     private BookingResult resolveDuplicate(BookingCommand command, DuplicateKeyException duplicate) {
@@ -206,7 +271,7 @@ public final class AppointmentWriteService {
         if (command.plan() != null) {
             PlanRow plan = findPlanForUpdate(command);
             if (plan == null) {
-                return BookingResult.failure("PLAN_NOT_FOUND", "预约方案不存在或不属于当前用户");
+                return reject(command, "PLAN_NOT_FOUND", "预约方案不存在或不属于当前用户", null, null);
             }
             planRowId = plan.id();
             slotId = null;
@@ -235,10 +300,10 @@ public final class AppointmentWriteService {
         }
         ExistingRow row = existing.get(0);
         if (planRowId != null && row.planId() != planRowId) {
-            return BookingResult.failure("IDEMPOTENCY_CONFLICT", "幂等键已用于其他预约方案");
+            return reject(command, "IDEMPOTENCY_CONFLICT", "幂等键已用于其他预约方案", planRowId, null);
         }
         if (planRowId == null && slotId != null && row.slotId() != slotId) {
-            return BookingResult.failure("IDEMPOTENCY_CONFLICT", "幂等键已用于其他号源");
+            return reject(command, "IDEMPOTENCY_CONFLICT", "幂等键已用于其他号源", null, slotId);
         }
         return BookingResult.existing(row.appointmentNo());
     }

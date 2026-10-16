@@ -175,7 +175,7 @@ class MySqlTaskStateStoreTest {
     }
 
     @Test
-    void portalBookingRefusesAnUnavailableSlotWithoutWritingAnything() {
+    void portalBookingRefusesAnUnavailableSlotAndAuditsTheRefusal() {
         jdbc.update("UPDATE appointment_slot SET status = 'RESERVED' WHERE id = ?", slotId);
 
         AppointmentWriteService.BookingResult result = appointmentWriteService.book(
@@ -186,6 +186,28 @@ class MySqlTaskStateStoreTest {
         assertThat(result.code()).isEqualTo("SLOT_UNAVAILABLE");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?", Long.class,
                 patientId)).isZero();
+        assertThat(jdbc.queryForObject("""
+                SELECT COUNT(*) FROM operation_audit_log
+                WHERE patient_id = ? AND result_status = 'REJECTED' AND result_code = 'SLOT_UNAVAILABLE'
+                  AND target_type = 'APPOINTMENT_SLOT' AND target_id = ?
+                """, Long.class, patientId, slotId)).isEqualTo(1);
+    }
+
+    @Test
+    void aFailedWriteRollsBackAndLeavesNoHalfWrittenAppointment() {
+        // An over-long operator type breaks the audit insert, which is the last step of the same
+        // transaction. The booking must roll back completely rather than survive unrecorded, and the
+        // original error must reach the caller instead of being swallowed by the audit retry.
+        AppointmentWriteService.BookingCommand command = AppointmentWriteService.BookingCommand.forSlot(
+                new AppointmentWriteService.Actor(patientId, "P".repeat(40)), "portal-idem-broken", slotId);
+
+        assertThatThrownBy(() -> appointmentWriteService.book(command))
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?", Long.class,
+                patientId)).isZero();
+        assertThat(jdbc.queryForObject("SELECT status FROM appointment_slot WHERE id = ?", String.class, slotId))
+                .isEqualTo("AVAILABLE");
     }
 
     @Test
@@ -211,6 +233,11 @@ class MySqlTaskStateStoreTest {
                 patientId)).isEqualTo(1);
         assertThat(jdbc.queryForObject("SELECT status FROM appointment_slot WHERE id = ?", String.class,
                 otherSlotId)).isEqualTo("AVAILABLE");
+        assertThat(jdbc.queryForObject("""
+                SELECT COUNT(*) FROM operation_audit_log
+                WHERE patient_id = ? AND result_status = 'REJECTED'
+                  AND result_code = 'IDEMPOTENCY_CONFLICT' AND target_id = ?
+                """, Long.class, patientId, otherSlotId)).isEqualTo(1);
     }
 
     @Test
@@ -627,8 +654,15 @@ class MySqlTaskStateStoreTest {
         assertThat(occupied.message()).contains("号源已被占用");
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?", Long.class,
                 patientId)).isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM operation_audit_log WHERE patient_id = ?",
-                Long.class, patientId)).isEqualTo(1);
+        // The idempotent replay above is not audited again: it created nothing. The two refusals are.
+        assertThat(jdbc.queryForObject("""
+                SELECT COUNT(*) FROM operation_audit_log
+                WHERE patient_id = ? AND result_status = 'SUCCEEDED'
+                """, Long.class, patientId)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("""
+                SELECT GROUP_CONCAT(result_code ORDER BY id) FROM operation_audit_log
+                WHERE patient_id = ? AND result_status = 'REJECTED'
+                """, String.class, patientId)).isEqualTo("IDEMPOTENCY_CONFLICT,SLOT_UNAVAILABLE");
     }
 
     @Test
