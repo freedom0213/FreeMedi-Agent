@@ -1,6 +1,7 @@
 param(
     [string]$MySqlBin,
-    [int]$Port = 13316
+    [int]$Port = 13316,
+    [switch]$KeepData
 )
 
 $ErrorActionPreference = 'Stop'
@@ -32,6 +33,7 @@ $dataDirectory = Join-Path $runDirectory 'data'
 New-Item -ItemType Directory -Path $dataDirectory -Force | Out-Null
 $baseDirectory = Split-Path $MySqlBin
 $testServer = $null
+$succeeded = $false
 $previousUrl = [Environment]::GetEnvironmentVariable('MEDIFLOW_TEST_DB_URL', 'Process')
 $previousUser = [Environment]::GetEnvironmentVariable('MEDIFLOW_TEST_DB_USERNAME', 'Process')
 $previousPassword = [Environment]::GetEnvironmentVariable('MEDIFLOW_TEST_DB_PASSWORD', 'Process')
@@ -75,6 +77,7 @@ try {
         if ([int]$report.testsuite.tests -lt 1 -or [int]$report.testsuite.skipped -gt 0) {
             throw 'MySQL integration tests did not execute; refusing a false-positive test run.'
         }
+        $succeeded = $true
     } finally { Pop-Location }
 } finally {
     [Environment]::SetEnvironmentVariable('MEDIFLOW_TEST_DB_URL', $previousUrl, 'Process')
@@ -89,5 +92,12 @@ try {
             }
         }
     }
-    Write-Host "Test data and diagnostics retained under $runDirectory (ignored by Git)."
+    if ($succeeded -and -not $KeepData) {
+        # Every run reserves about 180 MB, so a passing run cleans up after itself.
+        # -KeepData, and any failure, still retain the directory for diagnosis.
+        Remove-Item -LiteralPath $runDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host 'Removed the disposable test data directory. Use -KeepData to retain it.'
+    } else {
+        Write-Host "Test data and diagnostics retained under $runDirectory (ignored by Git)."
+    }
 }
