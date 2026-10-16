@@ -75,12 +75,15 @@ RAG 不阻塞 P0/P1 预约闭环。进入 P2 后采用：
 
 | 层 | 选择 | 说明 |
 |---|---|---|
-| 向量数据库 | Qdrant 1.13.x | 与 MySQL 业务库职责分离，支持向量检索和 metadata 过滤 |
-| Embedding | SiliconFlow BGE-M3 | 沿用 `zhixu` 的模型经验 |
-| Rerank | BGE-reranker-v2-m3 | 只在检索质量需要时启用 |
+| 向量数据库 | Qdrant 1.13.x（实际 1.13.6） | 与 MySQL 业务库职责分离，支持向量检索和 metadata 过滤 |
+| Embedding（默认） | 本地 ONNX `bge-small-zh-v1.5-q`，512 维 | **实际实现的默认**：模型随依赖打包，不需要 Key、不依赖外部服务，测试可离线复跑 |
+| Embedding（可选） | SiliconFlow BGE-M3，1024 维 | 按配置切换；需要**独立的 Embedding Key**，不能复用对话模型的 Key |
+| Rerank | BGE-reranker-v2-m3 | 只在检索质量需要时启用，且必须先有测量 |
 | 文档内容 | 医院预约规则、就诊须知、服务说明 | 不放实时号源和患者隐私 |
 
 Qdrant 只有在 P2 需要 RAG 时才加入 Docker Compose。首版不额外部署 Elasticsearch、Milvus 或 PostgreSQL，避免基础设施重复。
+
+**换 Embedding 模型等于换索引**：向量维度由配置声明，两种模型不得混入同一个集合；切换后必须整体重建索引。这一点由 `TextEmbedder` 端口的 `name()` / `dimensions()` 承载，不是约定而是代码约束。
 
 ## 4. 关键取舍
 
