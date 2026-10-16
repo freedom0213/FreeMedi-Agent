@@ -3,6 +3,7 @@ doc_no: DOCTOR-3006
 title: 刘医生 专长介绍
 type: DOCTOR_PROFILE
 doctor_id: 3006
+department_id: 2005
 source: 演示医院医生资料（合成资料）
 ---
 

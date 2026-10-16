@@ -85,8 +85,15 @@ public final class KnowledgeMarkdownParser {
         KnowledgeDocType type = KnowledgeDocType.from(front.get("type"));
         Long departmentId = optionalId(front, "department_id", origin);
         Long doctorId = optionalId(front, "doctor_id", origin);
-        if (type == KnowledgeDocType.DOCTOR_PROFILE && doctorId == null) {
-            throw new IllegalArgumentException(origin + " 是医生资料，必须给出 doctor_id");
+        if (type == KnowledgeDocType.DOCTOR_PROFILE) {
+            if (doctorId == null) {
+                throw new IllegalArgumentException(origin + " 是医生资料，必须给出 doctor_id");
+            }
+            // A doctor profile must also name its department. Leaving it blank would make the profile
+            // look like unscoped material and let any department filter reach it.
+            if (departmentId == null) {
+                throw new IllegalArgumentException(origin + " 是医生资料，必须给出该医生所属的 department_id");
+            }
         }
         if (type == KnowledgeDocType.DEPARTMENT_INTRO && departmentId == null) {
             throw new IllegalArgumentException(origin + " 是科室资料，必须给出 department_id");

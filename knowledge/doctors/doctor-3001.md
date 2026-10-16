@@ -3,6 +3,7 @@ doc_no: DOCTOR-3001
 title: 林医生 专长介绍
 type: DOCTOR_PROFILE
 doctor_id: 3001
+department_id: 2001
 source: 演示医院医生资料（合成资料）
 ---
 

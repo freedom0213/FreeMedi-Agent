@@ -78,6 +78,16 @@
             <artifactId>langchain4j-open-ai</artifactId>
             <version>${langchain4j.version}</version>
         </dependency>
+        <!--
+          Local Chinese embedding model (ONNX, runs in-process). Chosen so the semantic search
+          pipeline can be built, tested and demonstrated with no API key and no external service.
+          The model file is fetched once into the Maven cache on first use.
+        -->
+        <dependency>
+            <groupId>dev.langchain4j</groupId>
+            <artifactId>langchain4j-embeddings-bge-small-zh-v15-q</artifactId>
+            <version>${langchain4j.version}</version>
+        </dependency>
 
         <dependency>
             <groupId>io.jsonwebtoken</groupId>

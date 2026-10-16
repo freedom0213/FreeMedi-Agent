@@ -124,6 +124,119 @@ public final class KnowledgeRepository {
         return count == null ? 0 : count;
     }
 
+    /** A chunk together with the document fields needed to decide whether it may be shown. */
+    public record ChunkView(long chunkId, long documentId, int version, int chunkNo, String heading,
+                            String content, String docNo, String title, KnowledgeDocType docType,
+                            String source, Instant publishedAt, KnowledgeStatus status,
+                            Long departmentId, Long doctorId,
+                            KnowledgeChunk.EmbeddingStatus embeddingStatus) {
+        public boolean retrievable() {
+            return status == KnowledgeStatus.PUBLISHED;
+        }
+    }
+
+    /** A chunk waiting for a vector, with the metadata the index has to filter on. */
+    public record PendingChunk(long chunkId, long documentId, int version, String heading,
+                               String content, KnowledgeDocType docType, Long departmentId,
+                               Long doctorId) {
+    }
+
+    /**
+     * Chunks that still need a vector. Only published documents are indexed, and a chunk already
+     * marked INDEXED is never re-embedded: re-running is a no-op, and a retry only picks up what
+     * actually failed.
+     */
+    public List<PendingChunk> findChunksPendingIndex(int limit) {
+        return jdbc.query("""
+                SELECT c.id, c.document_id, c.version, c.heading, c.content,
+                       d.doc_type, d.department_id, d.doctor_id
+                FROM knowledge_chunk c
+                JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+                WHERE c.embedding_status <> 'INDEXED' AND d.status = 'PUBLISHED'
+                ORDER BY c.id
+                LIMIT ?
+                """, (result, rowNum) -> new PendingChunk(
+                result.getLong("id"), result.getLong("document_id"), result.getInt("version"),
+                result.getString("heading"), result.getString("content"),
+                KnowledgeDocType.from(result.getString("doc_type")),
+                result.getObject("department_id", Long.class),
+                result.getObject("doctor_id", Long.class)), limit);
+    }
+
+    /**
+     * Reads chunks back by id and joins the document on the same version, so a chunk left over from
+     * a superseded version cannot be returned even if the index still holds its vector.
+     */
+    public List<ChunkView> findChunkViews(List<Long> chunkIds) {
+        if (chunkIds == null || chunkIds.isEmpty()) {
+            return List.of();
+        }
+        String placeholders = String.join(",", java.util.Collections.nCopies(chunkIds.size(), "?"));
+        return jdbc.query("""
+                SELECT c.id AS chunk_id, c.document_id, c.version, c.chunk_no, c.heading, c.content,
+                       c.embedding_status, d.doc_no, d.title, d.doc_type, d.source, d.published_at,
+                       d.status, d.department_id, d.doctor_id
+                FROM knowledge_chunk c
+                JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+                WHERE c.id IN (%s)
+                """.formatted(placeholders),
+                (result, rowNum) -> new ChunkView(
+                        result.getLong("chunk_id"), result.getLong("document_id"),
+                        result.getInt("version"), result.getInt("chunk_no"),
+                        result.getString("heading"), result.getString("content"),
+                        result.getString("doc_no"), result.getString("title"),
+                        KnowledgeDocType.from(result.getString("doc_type")),
+                        result.getString("source"),
+                        toInstant(result.getTimestamp("published_at")),
+                        KnowledgeStatus.valueOf(result.getString("status")),
+                        result.getObject("department_id", Long.class),
+                        result.getObject("doctor_id", Long.class),
+                        KnowledgeChunk.EmbeddingStatus.valueOf(result.getString("embedding_status"))),
+                chunkIds.toArray());
+    }
+
+    public void markIndexed(List<Long> chunkIds, Instant indexedAt) {
+        if (chunkIds == null || chunkIds.isEmpty()) {
+            return;
+        }
+        String placeholders = String.join(",", java.util.Collections.nCopies(chunkIds.size(), "?"));
+        Object[] arguments = new Object[chunkIds.size() + 1];
+        arguments[0] = Timestamp.from(indexedAt);
+        for (int index = 0; index < chunkIds.size(); index++) {
+            arguments[index + 1] = chunkIds.get(index);
+        }
+        jdbc.update("""
+                UPDATE knowledge_chunk
+                SET embedding_status = 'INDEXED', index_error = NULL, indexed_at = ?
+                WHERE id IN (%s)
+                """.formatted(placeholders), arguments);
+    }
+
+    /** Records why one chunk failed so it can be retried and diagnosed without rebuilding the rest. */
+    public void markIndexFailed(long chunkId, String error) {
+        String message = error == null ? "unknown" : error;
+        jdbc.update("""
+                UPDATE knowledge_chunk SET embedding_status = 'FAILED', index_error = ? WHERE id = ?
+                """, message.length() <= 500 ? message : message.substring(0, 500), chunkId);
+    }
+
+    public int countChunksByEmbeddingStatus(KnowledgeChunk.EmbeddingStatus status) {
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM knowledge_chunk WHERE embedding_status = ?", Integer.class,
+                status.name());
+        return count == null ? 0 : count;
+    }
+
+    /** Drops every point of a superseded version from the index. */
+    public List<Long> findChunkIdsByStatus(KnowledgeChunk.EmbeddingStatus status) {
+        return jdbc.query("SELECT id FROM knowledge_chunk WHERE embedding_status = ? ORDER BY id",
+                (result, rowNum) -> result.getLong("id"), status.name());
+    }
+
+    private static Instant toInstant(Timestamp timestamp) {
+        return timestamp == null ? null : timestamp.toInstant();
+    }
+
     private static KnowledgeDocument mapDocument(java.sql.ResultSet result, int rowNum)
             throws java.sql.SQLException {
         Timestamp publishedAt = result.getTimestamp("published_at");

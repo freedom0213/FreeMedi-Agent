@@ -91,7 +91,8 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'MySQL integration tests failed.' }
         $integrationClasses = @(
             'com.mediflow.agent.agent.persistence.MySqlTaskStateStoreTest',
-            'com.mediflow.agent.knowledge.MySqlKnowledgeImportTest'
+            'com.mediflow.agent.knowledge.MySqlKnowledgeImportTest',
+            'com.mediflow.agent.knowledge.MySqlKnowledgeSearchTest'
         )
         foreach ($className in $integrationClasses) {
             $reportPath = Join-Path $workspaceRoot "target\surefire-reports\TEST-$className.xml"
