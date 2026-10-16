@@ -169,7 +169,8 @@ public final class SlotQueryService {
                 params.toArray());
     }
 
-    private static String formatTime(Timestamp timestamp) {
+    /** Shared with {@link AppointmentQueryService} so both render slot times the same way. */
+    static String formatTime(Timestamp timestamp) {
         LocalTime time = timestamp.toLocalDateTime().toLocalTime();
         return time.toString().substring(0, 5);
     }

@@ -18,6 +18,7 @@ import com.mediflow.agent.agent.StreamingReplyService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.Size;
 
 import org.springframework.context.annotation.Profile;
 import org.springframework.http.MediaType;
@@ -160,7 +161,7 @@ public class AgentTaskController {
     public record MessageRequest(@NotBlank String message) { }
 
     public record ConfirmRequest(@NotBlank String planId, @NotNull Integer planVersion,
-                                 @NotBlank String idempotencyKey) { }
+                                 @NotBlank @Size(max = 64) String idempotencyKey) { }
 
     public record TaskCreatedResponse(String taskId, String status) { }
 }

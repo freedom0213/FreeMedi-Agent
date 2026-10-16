@@ -329,6 +329,110 @@ class MySqlTaskStateStoreTest {
                 .andExpect(status().isBadRequest());
     }
 
+    @Test
+    void httpPortalBookingCreatesAndReplaysAnAppointment() throws Exception {
+        String key = "portal-http-" + UUID.randomUUID();
+        String body = "{\"slotId\":" + slotId + ",\"idempotencyKey\":\"" + key + "\"}";
+        var created = mockMvc.perform(post("/api/v1/appointments")
+                        .header("X-Demo-User-Id", String.valueOf(patientId))
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.outcome").value("CREATED"))
+                .andReturn();
+        String appointmentNo = json.readTree(created.getResponse().getContentAsString())
+                .get("appointmentNo").asText();
+        assertThat(jdbc.queryForObject("""
+                SELECT COUNT(*) FROM appointment
+                WHERE patient_id = ? AND plan_id IS NULL AND booked_via = 'PORTAL'
+                """, Long.class, patientId)).isEqualTo(1);
+
+        mockMvc.perform(post("/api/v1/appointments")
+                        .header("X-Demo-User-Id", String.valueOf(patientId))
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.outcome").value("EXISTING"))
+                .andExpect(jsonPath("$.appointmentNo").value(appointmentNo));
+
+        mockMvc.perform(get("/api/v1/appointments/mine")
+                        .header("X-Demo-User-Id", String.valueOf(patientId)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1))
+                .andExpect(jsonPath("$[0].appointmentNo").value(appointmentNo))
+                .andExpect(jsonPath("$[0].bookedVia").value("PORTAL"))
+                .andExpect(jsonPath("$[0].timeRange").value("14:00-14:30"));
+
+        mockMvc.perform(get("/api/v1/appointments/" + appointmentNo)
+                        .header("X-Demo-User-Id", String.valueOf(patientId)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.departmentName").value(departmentName))
+                .andExpect(jsonPath("$.doctorName").value(doctorName));
+    }
+
+    @Test
+    void anotherPatientCannotSeeOrBookSomeoneElsesAppointment() throws Exception {
+        String key = "portal-isolation-" + UUID.randomUUID();
+        var created = mockMvc.perform(post("/api/v1/appointments")
+                        .header("X-Demo-User-Id", String.valueOf(patientId))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"slotId\":" + slotId + ",\"idempotencyKey\":\"" + key + "\"}"))
+                .andExpect(status().isOk())
+                .andReturn();
+        String appointmentNo = json.readTree(created.getResponse().getContentAsString())
+                .get("appointmentNo").asText();
+        String otherMarker = UUID.randomUUID().toString();
+        jdbc.update("""
+                INSERT INTO sys_user(username, password_hash, display_name, role, status)
+                VALUES (?, 'synthetic-test-only', '其他患者', 'PATIENT', 'ACTIVE')
+                """, otherMarker);
+        long otherPatient = jdbc.queryForObject("SELECT id FROM sys_user WHERE username = ?",
+                Long.class, otherMarker);
+
+        mockMvc.perform(get("/api/v1/appointments/mine")
+                        .header("X-Demo-User-Id", String.valueOf(otherPatient)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(0));
+        mockMvc.perform(get("/api/v1/appointments/" + appointmentNo)
+                        .header("X-Demo-User-Id", String.valueOf(otherPatient)))
+                .andExpect(status().isNotFound());
+        // The other patient cannot take the already booked slot either.
+        mockMvc.perform(post("/api/v1/appointments")
+                        .header("X-Demo-User-Id", String.valueOf(otherPatient))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"slotId\":" + slotId + ",\"idempotencyKey\":\"other-"
+                                + UUID.randomUUID() + "\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.code").value("SLOT_UNAVAILABLE"));
+    }
+
+    @Test
+    void httpPortalBookingReportsAConflictAndRejectsAnIncompleteRequest() throws Exception {
+        String unusable = "{\"slotId\":" + slotId + ",\"idempotencyKey\":\"conflict-" + patientId + "\"}";
+        jdbc.update("UPDATE appointment_slot SET status = 'RESERVED' WHERE id = ?", slotId);
+
+        mockMvc.perform(post("/api/v1/appointments")
+                        .header("X-Demo-User-Id", String.valueOf(patientId))
+                        .contentType(MediaType.APPLICATION_JSON).content(unusable))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.success").value(false))
+                .andExpect(jsonPath("$.code").value("SLOT_UNAVAILABLE"));
+
+        mockMvc.perform(post("/api/v1/appointments")
+                        .header("X-Demo-User-Id", String.valueOf(patientId))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"slotId\":" + slotId + "}"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(post("/api/v1/appointments")
+                        .header("X-Demo-User-Id", String.valueOf(patientId))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"slotId\":" + slotId + ",\"idempotencyKey\":\"" + "x".repeat(65) + "\"}"))
+                .andExpect(status().isBadRequest());
+
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?",
+                Long.class, patientId)).isZero();
+    }
+
     private static int availableMigrationCount() {
         try {
             return new PathMatchingResourcePatternResolver()
