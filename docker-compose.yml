@@ -1,0 +1,31 @@
+# Qdrant holds the knowledge index used for semantic search (M3).
+#
+# It is deliberately the only service here. MySQL and Redis are not part of this file because the
+# project already runs them as local services, and adding a second copy would create two competing
+# databases during development.
+#
+# MySQL remains the source of truth. This container stores vectors plus a few filter fields — never
+# the material's text and never any slot inventory — so the whole index can be dropped and rebuilt
+# from the database with scripts/index-knowledge.ps1 -Rebuild.
+#
+# The service is named mediflow-qdrant to match the container created by hand during development, and
+# it reuses the same volume, so switching to Compose keeps the indexed data. Remove the hand-made
+# container first if it still exists:
+#   docker rm -f mediflow-qdrant
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.13.6
+    container_name: mediflow-qdrant
+    ports:
+      # 6333 is the REST API the application uses; 6334 is gRPC, exposed so the store can be
+      # inspected with external tools.
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - mediflow-qdrant-data:/qdrant/storage
+    # No restart policy on purpose: this is a development service, and having it come back with
+    # Docker Desktop would make a stopped index look like a running one. Add "restart: unless-stopped"
+    # here if you would rather not start it by hand each time.
+
+volumes:
+  mediflow-qdrant-data:

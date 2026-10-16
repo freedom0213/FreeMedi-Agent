@@ -227,10 +227,28 @@ public final class KnowledgeRepository {
         return count == null ? 0 : count;
     }
 
-    /** Drops every point of a superseded version from the index. */
+    /** Chunk ids in one embedding state, used by reports and by the rebuild path's bookkeeping. */
     public List<Long> findChunkIdsByStatus(KnowledgeChunk.EmbeddingStatus status) {
         return jdbc.query("SELECT id FROM knowledge_chunk WHERE embedding_status = ? ORDER BY id",
                 (result, rowNum) -> result.getLong("id"), status.name());
+    }
+
+    /**
+     * Marks every chunk of the currently published version as needing a vector again, which is what
+     * a rebuild starts from.
+     *
+     * <p>Only published documents are reset: chunks left behind by a superseded or withdrawn version
+     * are not retrievable, so re-embedding them would spend model time on text nobody can ever be
+     * shown. The join is on the document's own version, so an old version of a live document is
+     * excluded as well.
+     */
+    public int resetPublishedChunksToPending() {
+        return jdbc.update("""
+                UPDATE knowledge_chunk c
+                JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+                SET c.embedding_status = 'PENDING', c.indexed_at = NULL, c.index_error = NULL
+                WHERE d.status = 'PUBLISHED'
+                """);
     }
 
     private static Instant toInstant(Timestamp timestamp) {

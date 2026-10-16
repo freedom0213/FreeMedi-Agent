@@ -2,6 +2,7 @@ package com.mediflow.agent.config;
 
 import java.time.Duration;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mediflow.agent.knowledge.ApiTextEmbedder;
 import com.mediflow.agent.knowledge.DisabledKnowledgeIndex;
 import com.mediflow.agent.knowledge.InMemoryKnowledgeIndex;
@@ -9,6 +10,7 @@ import com.mediflow.agent.knowledge.KnowledgeChunker;
 import com.mediflow.agent.knowledge.KnowledgeIndex;
 import com.mediflow.agent.knowledge.KnowledgeMarkdownParser;
 import com.mediflow.agent.knowledge.LocalOnnxTextEmbedder;
+import com.mediflow.agent.knowledge.QdrantKnowledgeIndex;
 import com.mediflow.agent.knowledge.TextEmbedder;
 
 import org.springframework.beans.factory.annotation.Value;
@@ -60,18 +62,30 @@ public class KnowledgeConfiguration {
     }
 
     /**
-     * {@code none} is the default on purpose. Until a real vector store is configured, the index must
-     * answer "unavailable" rather than "empty", because an empty index would be relayed to a patient
-     * as "the hospital has no such rule". {@code memory} is an explicit opt-in for local pipeline
-     * checks; it holds nothing across restarts and is never the production setting.
+     * {@code qdrant} is the configured production index. The model identifier and vector length are
+     * taken from the embedder itself rather than from separate settings, so the index cannot be built
+     * for one model while another one produces the vectors.
+     *
+     * <p>{@code none} exists so an unconfigured deployment says "cannot look it up" instead of "there
+     * is no such material": an empty index would be relayed to a patient as the hospital having no
+     * such rule. {@code memory} holds nothing across restarts and is only for local pipeline checks.
      */
     @Bean
-    KnowledgeIndex knowledgeIndex(@Value("${mediflow.knowledge.index:none}") String kind) {
+    KnowledgeIndex knowledgeIndex(
+            TextEmbedder embedder,
+            ObjectMapper json,
+            @Value("${mediflow.knowledge.index:qdrant}") String kind,
+            @Value("${mediflow.qdrant.url:http://localhost:6333}") String url,
+            @Value("${mediflow.qdrant.collection:mediflow_knowledge}") String collection,
+            @Value("${mediflow.qdrant.api-key:}") String apiKey,
+            @Value("${mediflow.qdrant.timeout-ms:2000}") long timeoutMs) {
         return switch (kind.trim().toLowerCase()) {
+            case "qdrant" -> new QdrantKnowledgeIndex(url, collection, embedder.name(),
+                    embedder.dimensions(), apiKey, Duration.ofMillis(timeoutMs), json);
             case "memory" -> new InMemoryKnowledgeIndex();
             case "none" -> new DisabledKnowledgeIndex("mediflow.knowledge.index 未配置向量库");
             default -> throw new IllegalArgumentException(
-                    "未知的索引实现：" + kind + "，可选 none / memory");
+                    "未知的索引实现：" + kind + "，可选 qdrant / memory / none");
         };
     }
 }

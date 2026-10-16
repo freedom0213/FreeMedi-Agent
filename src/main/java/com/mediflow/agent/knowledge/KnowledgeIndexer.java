@@ -92,6 +92,34 @@ public final class KnowledgeIndexer {
     }
 
     /**
+     * Throws the index away and builds it again from MySQL.
+     *
+     * <p>This is the remedy the index's own guards point at. A collection is created for one vector
+     * size and one model, so changing either makes every existing vector unusable — and "unusable"
+     * must not be discovered as a search returning nothing, because an empty result reads as "the
+     * hospital has no such rule". It is also the recovery path for a lost index: MySQL is the fact
+     * source, so the vectors are reproducible.
+     *
+     * <p>Order matters: the index is dropped first, and only then are the chunks marked as needing a
+     * vector. Doing it the other way round would leave chunks marked INDEXED while their points are
+     * gone, and nothing would ever bring them back.
+     */
+    public IndexSummary rebuild() {
+        return rebuild(DEFAULT_BATCH_LIMIT);
+    }
+
+    public IndexSummary rebuild(int batchLimit) {
+        if (!index.available()) {
+            throw new IllegalStateException("索引当前不可用，无法重建；请先确认向量库是否在运行");
+        }
+        index.clear();
+        int reset = repository.resetPublishedChunksToPending();
+        logger.info("Knowledge index cleared for rebuild: chunksResetToPending={} model={}", reset,
+                embedder.name());
+        return indexPending(batchLimit);
+    }
+
+    /**
      * The string handed to the model. Kept as a method so the choice is visible and testable rather
      * than buried in a call.
      */

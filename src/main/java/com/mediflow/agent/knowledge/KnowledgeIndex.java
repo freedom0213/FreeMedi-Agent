@@ -34,7 +34,14 @@ public interface KnowledgeIndex {
     /** Drops every point of one document version, used when a version is superseded or withdrawn. */
     void removeVersion(long documentId, int version);
 
-    /** Nearest points first. {@code filter} narrows by metadata; status is always restricted to published. */
+    /**
+     * Nearest points first. {@code filter} narrows by metadata; status is always restricted to published.
+     *
+     * <p>Up to {@code topK} candidates come back even when none of them is related to the query, at a
+     * score near zero: a vector store ranks, it does not judge. A non-empty result therefore says
+     * nothing about whether the material answers the question, and "no material" must never be
+     * concluded from it.
+     */
     List<KnowledgeIndexHit> search(float[] queryVector, KnowledgeIndexFilter filter, int topK);
 
     /** Drops everything. The index is rebuildable, so this is a recovery operation, not data loss. */

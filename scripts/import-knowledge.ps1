@@ -53,4 +53,4 @@ try {
 
 Write-Host "Material under '$SourcePath' has been imported into '$Database'."
 Write-Host 'Unchanged files are skipped, so re-running this command is a no-op.'
-Write-Host 'Chunks are stored as PENDING; indexing happens in the next step (M3 block 2).'
+Write-Host 'Chunks are stored as PENDING; give them vectors with scripts/index-knowledge.ps1.'

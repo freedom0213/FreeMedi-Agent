@@ -33,3 +33,26 @@ mediflow:
     api-key: ${DEEPSEEK_API_KEY:}
     base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com/v1}
     model: ${DEEPSEEK_MODEL:deepseek-chat}
+  embedding:
+    # local runs a Chinese ONNX model in process and needs no key; api calls an OpenAI-compatible
+    # endpoint and requires its own key, which must not be the conversational one.
+    provider: ${MEDIFLOW_EMBEDDING_PROVIDER:local}
+    api-key: ${MEDIFLOW_EMBEDDING_API_KEY:}
+    base-url: ${MEDIFLOW_EMBEDDING_BASE_URL:https://api.siliconflow.cn/v1}
+    model: ${MEDIFLOW_EMBEDDING_MODEL:BAAI/bge-m3}
+    dimensions: ${MEDIFLOW_EMBEDDING_DIMENSIONS:1024}
+  knowledge:
+    # qdrant is the persistent index. memory holds nothing across restarts and is for local checks
+    # only; none makes every lookup report "cannot look it up" rather than "no such material".
+    index: ${MEDIFLOW_KNOWLEDGE_INDEX:qdrant}
+    source-dir: ${MEDIFLOW_KNOWLEDGE_SOURCE_DIR:knowledge}
+    chunk:
+      # Starting values; a threshold that suits one embedding model does not transfer to another.
+      target: ${MEDIFLOW_KNOWLEDGE_CHUNK_TARGET:400}
+      overlap: ${MEDIFLOW_KNOWLEDGE_CHUNK_OVERLAP:80}
+      max: ${MEDIFLOW_KNOWLEDGE_CHUNK_MAX:800}
+  qdrant:
+    url: ${MEDIFLOW_QDRANT_URL:http://localhost:6333}
+    collection: ${MEDIFLOW_QDRANT_COLLECTION:mediflow_knowledge}
+    api-key: ${MEDIFLOW_QDRANT_API_KEY:}
+    timeout-ms: ${MEDIFLOW_QDRANT_TIMEOUT_MS:2000}
