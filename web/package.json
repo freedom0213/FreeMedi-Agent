@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vue-tsc -b && vite build",
-    "preview": "vite preview --host 0.0.0.0"
+    "preview": "vite preview --host 0.0.0.0",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "axios": "1.8.4",
@@ -17,6 +18,7 @@
     "vue-router": "4.5.0"
   },
   "devDependencies": {
+    "@playwright/test": "1.65.1",
     "@types/node": "22.13.10",
     "@vitejs/plugin-vue": "5.2.1",
     "typescript": "5.7.3",
