@@ -2,6 +2,8 @@ package com.mediflow.agent.appointment;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 import javax.sql.DataSource;
@@ -149,7 +151,73 @@ public final class AppointmentWriteService {
                 : new VerificationResult(false, "未找到预约记录");
     }
 
+    /** Reads the outcome of the exact original intent. This path never reserves or audits a new attempt. */
+    public Optional<BookingResult> lookup(BookingCommand command) {
+        var original = jdbc.query("""
+                SELECT a.appointment_no, a.booked_via, a.slot_id, p.plan_no, a.confirmed_version
+                FROM appointment a LEFT JOIN agent_plan p ON p.id = a.plan_id
+                WHERE a.patient_id = ? AND a.idempotency_key = ?
+                """, (row, index) -> new IntentRow(row.getString("appointment_no"),
+                row.getString("booked_via"), row.getLong("slot_id"), row.getString("plan_no"),
+                row.getInt("confirmed_version"), null), command.actor().userId(), command.idempotencyKey());
+        if (!original.isEmpty()) {
+            IntentRow row = original.get(0);
+            return Optional.of(row.matches(command) ? BookingResult.existing(row.appointmentNo()) : keyConflict());
+        }
+        return Optional.ofNullable(recordedRejection(command));
+    }
+
+    /** Older Agent checkpoints may lack the key. Only an appointment attached to that exact plan qualifies. */
+    public Optional<BookingResult> lookupPlan(long patientId, PlanClaim plan) {
+        var rows = jdbc.queryForList("""
+                SELECT a.appointment_no FROM appointment a JOIN agent_plan p ON p.id = a.plan_id
+                WHERE a.patient_id = ? AND a.booked_via = 'AGENT' AND p.plan_no = ?
+                  AND a.confirmed_version = ? AND p.version = ?
+                LIMIT 2
+                """, String.class, patientId, plan.planNo(), plan.version(), plan.version());
+        return rows.size() == 1 ? Optional.of(BookingResult.existing(rows.get(0))) : Optional.empty();
+    }
+
+    private BookingResult recordedRejection(BookingCommand command) {
+        return jdbc.query("""
+                SELECT audit.target_id, audit.result_code, p.plan_no, p.version
+                FROM operation_audit_log audit LEFT JOIN agent_plan p ON p.id = audit.plan_id
+                WHERE audit.patient_id = ? AND audit.idempotency_key = ?
+                  AND audit.operation_type = 'APPOINTMENT_CREATE' AND audit.result_status = 'REJECTED'
+                  AND audit.result_code NOT IN ('IDEMPOTENCY_CONFLICT', 'PLAN_NOT_FOUND')
+                ORDER BY audit.id LIMIT 1
+                """, (row, index) -> new IntentRow(null, row.getString("plan_no") == null ? "PORTAL" : "AGENT",
+                row.getLong("target_id"), row.getString("plan_no"), row.getInt("version"),
+                row.getString("result_code")), command.actor().userId(), command.idempotencyKey()).stream()
+                .findFirst().map(row -> row.matches(command)
+                        ? BookingResult.failure(row.code(), "原预约未提交：" + rejectionMessage(row.code()))
+                        : keyConflict()).orElse(null);
+    }
+
+    private static BookingResult keyConflict() {
+        return BookingResult.failure("IDEMPOTENCY_CONFLICT", "原请求标识已用于其他预约方案或号源。");
+    }
+
+    private static String rejectionMessage(String code) {
+        return switch (code) {
+            case "SLOT_UNAVAILABLE" -> "号源已被占用，请重新选择。";
+            case "SLOT_INVALID", "SLOT_NOT_FOUND" -> "号源已失效，请重新查询。";
+            case "PLAN_EXPIRED" -> "方案已过期，请重新查询。";
+            default -> "预约条件未通过校验。";
+        };
+    }
+
+    private record IntentRow(String appointmentNo, String source, long slotId, String planNo, int version, String code) {
+        boolean matches(BookingCommand command) {
+            return source.equals(command.source().name()) && (command.plan() == null
+                    ? Objects.equals(slotId, command.slotId())
+                    : command.plan().planNo().equals(planNo) && command.plan().version() == version);
+        }
+    }
+
     private BookingResult bookInTransaction(BookingCommand command) {
+        // Same patient and key must observe the first outcome even when two different slots are sent.
+        jdbc.queryForList("SELECT id FROM sys_user WHERE id = ? FOR UPDATE", Long.class, command.actor().userId());
         if (command.plan() != null) {
             PlanRow plan = findPlanForUpdate(command);
             if (plan == null) {
@@ -159,6 +227,8 @@ public final class AppointmentWriteService {
             if (existing != null) {
                 return existing;
             }
+            BookingResult recorded = recordedRejection(command);
+            if (recorded != null) return recorded;
             if (!PlanStatus.CONFIRMED.name().equals(plan.status())) {
                 return reject(command, "PLAN_NOT_CONFIRMED", "预约方案尚未完成确认",
                         plan.id(), plan.slotId());
@@ -179,6 +249,8 @@ public final class AppointmentWriteService {
         if (existing != null) {
             return existing;
         }
+        BookingResult recorded = recordedRejection(command);
+        if (recorded != null) return recorded;
         SlotRow slot = findSlotForUpdate(command.slotId());
         if (slot == null) {
             return reject(command, "SLOT_NOT_FOUND", "号源不存在或已被关闭", null, command.slotId());
@@ -289,16 +361,18 @@ public final class AppointmentWriteService {
      */
     private BookingResult findExisting(BookingCommand command, Long planRowId, Long slotId) {
         List<ExistingRow> existing = jdbc.query("""
-                SELECT appointment_no, plan_id, slot_id
+                SELECT appointment_no, plan_id, slot_id, booked_via
                 FROM appointment
                 WHERE patient_id = ? AND idempotency_key = ?
                 """, (result, rowNum) -> new ExistingRow(
-                result.getString("appointment_no"), result.getLong("plan_id"), result.getLong("slot_id")),
+                result.getString("appointment_no"), result.getLong("plan_id"), result.getLong("slot_id"),
+                result.getString("booked_via")),
                 command.actor().userId(), command.idempotencyKey());
         if (existing.isEmpty()) {
             return null;
         }
         ExistingRow row = existing.get(0);
+        if (!command.source().name().equals(row.source())) return keyConflict();
         if (planRowId != null && row.planId() != planRowId) {
             return reject(command, "IDEMPOTENCY_CONFLICT", "幂等键已用于其他预约方案", planRowId, null);
         }
@@ -331,7 +405,12 @@ public final class AppointmentWriteService {
                 FROM appointment_slot s
                 JOIN doctor_schedule ds ON ds.id = s.schedule_id
                 JOIN doctor d ON d.id = ds.doctor_id
+                JOIN department dept ON dept.id = d.department_id
                 WHERE s.id = ?
+                  AND s.start_at > UTC_TIMESTAMP(3)
+                  AND ds.status = 'OPEN'
+                  AND d.status = 'ACTIVE'
+                  AND dept.status = 'ACTIVE'
                 FOR UPDATE
                 """, (result, rowNum) -> new SlotRow(
                 result.getLong("id"), result.getString("status"),
@@ -346,6 +425,6 @@ public final class AppointmentWriteService {
     private record SlotRow(long id, String status, long doctorId, long departmentId) {
     }
 
-    private record ExistingRow(String appointmentNo, long planId, long slotId) {
+    private record ExistingRow(String appointmentNo, long planId, long slotId, String source) {
     }
 }

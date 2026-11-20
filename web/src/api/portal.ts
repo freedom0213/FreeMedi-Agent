@@ -37,14 +37,24 @@ export async function bookSlot(slotId: number, idempotencyKey: string): Promise<
   return data
 }
 
+export async function checkPortalBooking(slotId: number, idempotencyKey: string): Promise<BookingResult> {
+  const { data } = await http.post<BookingResult>('/appointments/status', { slotId, idempotencyKey })
+  return data
+}
+
 export async function listMyAppointments(): Promise<AppointmentRecord[]> {
   const { data } = await http.get<AppointmentRecord[]>('/appointments/mine')
   return data
 }
 
 export async function getAppointment(appointmentNo: string): Promise<AppointmentRecord> {
-  const { data } = await http.get<AppointmentRecord>(`/appointments/${appointmentNo}`)
+  const { data } = await http.get<AppointmentRecord>(`/appointments/${encodeURIComponent(appointmentNo)}`)
   return data
+}
+
+export async function openVisitConsultation(appointmentNo: string): Promise<string> {
+  const { data } = await http.post<{ taskId: string }>(`/appointments/${encodeURIComponent(appointmentNo)}/consultation`)
+  return data.taskId
 }
 
 export function periodLabel(period: string): string {

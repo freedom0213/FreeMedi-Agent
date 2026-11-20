@@ -18,6 +18,22 @@ export interface TaskTurn {
   status: string
 }
 
+export interface KnowledgeSource {
+  chunkId: number
+  docNo: string
+  version: number
+  title: string
+  source: string
+  heading: string
+  content: string
+  publishedAt: string
+}
+
+export interface KnowledgeReply {
+  status: 'ANSWERED' | 'NO_EVIDENCE' | 'UNAVAILABLE' | 'INVALID_QUESTION'
+  sources: KnowledgeSource[]
+}
+
 export interface PlanDraft {
   patientId: number
   departmentId: number
@@ -45,6 +61,34 @@ export interface SlotResult {
   appointmentDate: string
   clinicPeriod: string
   timeRange: string
+  differences?: string[]
+}
+
+export interface Requirements {
+  departmentId?: number
+  departmentName?: string
+  doctorId?: number
+  doctorName?: string
+  appointmentDate?: string
+  clinicPeriod?: string
+  dateFlexible?: boolean
+  periodFlexible?: boolean
+  sources?: Partial<Record<'departmentId' | 'doctorId' | 'appointmentDate' | 'clinicPeriod', 'PAGE' | 'CONVERSATION'>>
+}
+
+export interface RequirementChanges {
+  departmentId?: number | null
+  doctorId?: number | null
+  appointmentDate?: string
+  clinicPeriod?: string
+  dateFlexible?: boolean
+  periodFlexible?: boolean
+}
+
+export interface CandidateBatch {
+  id: string
+  slots: SlotResult[]
+  message: string
 }
 
 export interface ToolResult {
@@ -58,12 +102,22 @@ export interface TaskSnapshot {
   taskId: { value: string } | string
   patientId: number
   status: TaskStatus
+  taskType?: 'APPOINTMENT_BOOKING' | 'VISIT_CONSULTATION'
   stepCount: number
   turnCount: number
   facts: Record<string, unknown>
   activePlan?: AppointmentPlan | { present: boolean; value?: AppointmentPlan } | null
   lastToolResult?: ToolResult | { present: boolean; value?: ToolResult } | null
   turns: TaskTurn[]
+}
+
+export interface VisitAppointment {
+  appointmentNo: string
+  departmentName: string
+  doctorName: string
+  appointmentDate: string
+  timeRange: string
+  bookedVia: string
 }
 
 export interface TriageRecommendation {
@@ -81,9 +135,17 @@ export interface AgentEvent {
 export interface AgentResult {
   message: string
   success?: boolean
+  code?: string | null
   status: TaskStatus
   events: AgentEvent[]
   task: TaskSnapshot
+}
+
+export interface ConfirmationIntent {
+  taskId: string
+  planId: string
+  planVersion: number
+  idempotencyKey: string
 }
 
 export interface TaskCreated {

@@ -2,11 +2,14 @@ package com.mediflow.agent.appointment;
 
 import java.time.DateTimeException;
 import java.time.LocalDate;
+import java.time.temporal.TemporalAdjusters;
+import java.time.DayOfWeek;
 import java.util.regex.Pattern;
 
 /** Normalizes common patient date expressions at the tool boundary. */
 public final class AppointmentDateParser {
     private static final Pattern MONTH_DAY = Pattern.compile("(?:(\\d{4})年)?(\\d{1,2})月(\\d{1,2})[日号]?");
+    private static final Pattern WEEKDAY = Pattern.compile("([本这下])?(?:周|星期)([一二三四五六日天])");
 
     private AppointmentDateParser() { }
 
@@ -17,6 +20,14 @@ public final class AppointmentDateParser {
         if (text.equals("今天")) return today;
         if (text.equals("明天")) return today.plusDays(1);
         if (text.equals("后天")) return today.plusDays(2);
+        var weekday = WEEKDAY.matcher(text);
+        if (weekday.matches()) {
+            int index = "一二三四五六日天".indexOf(weekday.group(2));
+            DayOfWeek day = DayOfWeek.of(Math.min(index + 1, 7));
+            if (weekday.group(1) == null) return today.with(TemporalAdjusters.nextOrSame(day));
+            LocalDate monday = today.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
+            return monday.plusDays(index > 6 ? 6 : index).plusWeeks("下".equals(weekday.group(1)) ? 1 : 0);
+        }
         try {
             var match = MONTH_DAY.matcher(text);
             if (match.matches()) {

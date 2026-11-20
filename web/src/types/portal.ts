@@ -37,7 +37,7 @@ export type BookingOutcome = 'CREATED' | 'EXISTING' | 'REJECTED'
 
 export interface BookingResult {
   success: boolean
-  outcome: BookingOutcome
+  outcome: BookingOutcome | null
   appointmentNo: string | null
   code: string | null
   message: string

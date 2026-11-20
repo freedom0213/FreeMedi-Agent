@@ -32,8 +32,17 @@ public final class KnowledgeRetriever {
     /** Fetched from the index before filtering, so dropouts in MySQL do not shrink the result below topK. */
     private static final int OVER_FETCH_FACTOR = 3;
 
-    public record RetrievedChunk(long chunkId, String docNo, String title, KnowledgeDocType docType,
-                                 String source, Instant publishedAt, String heading, String content,
+    /**
+     * One retrieved passage, with everything the caller needs to verify and cite it.
+     *
+     * <p>{@code departmentId} and {@code doctorId} are carried because a passage may name a clinician
+     * and that claim has to be checked against the live catalog before the passage is used: material
+     * can outlive a doctor's registration, and quoting it would then present a retired name as
+     * current.
+     */
+    public record RetrievedChunk(long chunkId, long documentId, int version, String docNo, String title,
+                                 KnowledgeDocType docType, String source, Instant publishedAt,
+                                 String heading, String content, Long departmentId, Long doctorId,
                                  double score) {
     }
 
@@ -69,8 +78,8 @@ public final class KnowledgeRetriever {
         try {
             hits = index.search(embedder.embed(query.trim()), filter, topK * OVER_FETCH_FACTOR);
         } catch (RuntimeException failure) {
-            logger.warn("Knowledge retrieval could not query the index: reason={}", failure.getMessage());
-            return unavailable(failure.getMessage());
+            logger.warn("Knowledge retrieval could not query the index: type={}", failure.getClass().getSimpleName());
+            return unavailable("向量索引查询失败");
         }
         if (hits.isEmpty()) {
             return new RetrievalResult(true, 0, embedder.name(), null, List.of());
@@ -81,7 +90,7 @@ public final class KnowledgeRetriever {
         hits.forEach(hit -> scores.put(hit.chunkId(), hit.score()));
         Map<Long, KnowledgeRepository.ChunkView> readable = new LinkedHashMap<>();
         for (KnowledgeRepository.ChunkView view : repository.findChunkViews(ordered)) {
-            if (view.retrievable()) {
+            if (view.retrievable() && matches(view, filter)) {
                 readable.put(view.chunkId(), view);
             }
         }
@@ -92,14 +101,25 @@ public final class KnowledgeRetriever {
             if (view == null) {
                 continue;
             }
-            chunks.add(new RetrievedChunk(view.chunkId(), view.docNo(), view.title(), view.docType(),
-                    view.source(), view.publishedAt(), view.heading(), view.content(),
+            chunks.add(new RetrievedChunk(view.chunkId(), view.documentId(), view.version(), view.docNo(),
+                    view.title(), view.docType(), view.source(), view.publishedAt(), view.heading(),
+                    view.content(), view.departmentId(), view.doctorId(),
                     scores.getOrDefault(chunkId, 0d)));
             if (chunks.size() == topK) {
                 break;
             }
         }
         return new RetrievalResult(true, chunks.size(), embedder.name(), null, List.copyOf(chunks));
+    }
+
+    private static boolean matches(KnowledgeRepository.ChunkView view, KnowledgeIndexFilter filter) {
+        return filter == null || (filter.docType() == null || filter.docType() == view.docType())
+                && sameSubjectOrGeneral(view.departmentId(), filter.departmentId())
+                && sameSubjectOrGeneral(view.doctorId(), filter.doctorId());
+    }
+
+    private static boolean sameSubjectOrGeneral(Long declared, Long wanted) {
+        return wanted == null || declared == null || wanted.equals(declared);
     }
 
     private static RetrievalResult unavailable(String reason) {

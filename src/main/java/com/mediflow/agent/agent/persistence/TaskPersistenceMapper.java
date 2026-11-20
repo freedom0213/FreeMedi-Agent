@@ -13,25 +13,34 @@ import org.apache.ibatis.annotations.Update;
 @Mapper
 public interface TaskPersistenceMapper {
     record TaskRow(long id, String taskNo, long patientId, String status, int stepCount,
-                   int currentTurnNo, long stateVersion, String collectedFacts, String lastToolResult) { }
+                   int currentTurnNo, long stateVersion, String collectedFacts, String lastToolResult, String taskType) { }
     record PlanRow(String planNo, int version, String planSnapshot, String status, String planDigest) { }
     record TurnRow(int turnNo, String clientRequestId, String userMessage, String assistantMessage,
                    String status) { }
 
     @Select("""
             SELECT id, task_no, patient_id, status, step_count, current_turn_no,
-                   state_version, collected_facts, last_tool_result
+                   state_version, collected_facts, last_tool_result, task_type
             FROM agent_task WHERE task_no = #{taskNo}
             """)
     TaskRow findTask(@Param("taskNo") String taskNo);
 
     @Insert("""
             INSERT INTO agent_task(task_no, session_id, patient_id, task_type, status, collected_facts)
-            SELECT #{taskNo}, id, patient_id, 'APPOINTMENT_BOOKING', 'UNDERSTANDING', '{}'
+            SELECT #{taskNo}, id, patient_id, #{taskType}, 'UNDERSTANDING', #{facts}
             FROM agent_session WHERE id = #{sessionId} AND patient_id = #{patientId} AND status = 'ACTIVE'
             """)
     int createTask(@Param("taskNo") String taskNo, @Param("sessionId") long sessionId,
-                   @Param("patientId") long patientId);
+                   @Param("patientId") long patientId, @Param("taskType") String taskType,
+                   @Param("facts") String facts);
+
+    @Select("""
+            SELECT task_no FROM agent_task
+            WHERE patient_id = #{patientId} AND task_type = 'VISIT_CONSULTATION'
+              AND collected_facts->>'$.visitAppointment.appointmentNo' = #{appointmentNo}
+            ORDER BY id LIMIT 1
+            """)
+    String findVisitConsultation(@Param("patientId") long patientId, @Param("appointmentNo") String appointmentNo);
 
     @Update("""
             UPDATE agent_task SET status = #{status}, current_turn_no = #{turnNo}, step_count = #{stepCount},
@@ -133,4 +142,12 @@ public interface TaskPersistenceMapper {
             """)
     void insertEvent(@Param("taskId") long taskId, @Param("eventNo") long eventNo,
                      @Param("from") String from, @Param("to") String to, @Param("type") String type);
+
+    @Insert("""
+            INSERT INTO agent_state_event(task_id, event_no, to_status, event_type, actor_type, reason_code, metadata)
+            VALUES (#{taskId}, #{eventNo}, #{status}, #{action}, 'SYSTEM', #{reason}, #{metadata})
+            """)
+    void insertAction(@Param("taskId") long taskId, @Param("eventNo") long eventNo,
+                      @Param("status") String status, @Param("action") String action,
+                      @Param("reason") String reason, @Param("metadata") String metadata);
 }

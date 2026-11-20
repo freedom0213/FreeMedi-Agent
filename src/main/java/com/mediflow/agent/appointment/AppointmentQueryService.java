@@ -77,6 +77,15 @@ public final class AppointmentQueryService {
                 MAPPER, appointmentNo.trim(), patientId).stream().findFirst();
     }
 
+    /** Serializes find-or-create of the consultation for a booked appointment. */
+    public boolean lockBookedForPatient(String appointmentNo, long patientId) {
+        return !jdbc.queryForList("""
+                SELECT id FROM appointment
+                WHERE appointment_no = ? AND patient_id = ? AND status = 'BOOKED'
+                FOR UPDATE
+                """, Long.class, appointmentNo, patientId).isEmpty();
+    }
+
     private static String range(Timestamp start, Timestamp end) {
         return SlotQueryService.formatTime(start) + "-" + SlotQueryService.formatTime(end);
     }

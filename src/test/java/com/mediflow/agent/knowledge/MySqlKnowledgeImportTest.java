@@ -135,6 +135,23 @@ class MySqlKnowledgeImportTest {
     }
 
     @Test
+    void reimportingAnOlderVersionOfAWithdrawnDocumentDoesNotRepublishIt() throws IOException {
+        String docNo = unique("WITHDRAWN-HISTORY");
+        String older = material(docNo, "PREPARATION", null, "历史版。");
+        write("withdrawn-history.md", older);
+        assertThat(importer.importDirectory(materialDir).imported()).isEqualTo(1);
+        write("withdrawn-history.md", material(docNo, "PREPARATION", null, "更新版。"));
+        assertThat(importer.importDirectory(materialDir).imported()).isEqualTo(1);
+        repository.archiveAllVersions(docNo);
+
+        write("withdrawn-history.md", older);
+        assertThat(importer.importDirectory(materialDir).skipped()).isEqualTo(1);
+        KnowledgeDocument latest = repository.findLatest(docNo).orElseThrow();
+        assertThat(latest.version()).isEqualTo(2);
+        assertThat(latest.status()).isEqualTo(KnowledgeStatus.ARCHIVED);
+    }
+
+    @Test
     void anInvalidFileIsReportedAndLeavesNoHalfImportedDocument() throws IOException {
         int documentsBefore = repository.countDocuments();
         write("broken.md", """

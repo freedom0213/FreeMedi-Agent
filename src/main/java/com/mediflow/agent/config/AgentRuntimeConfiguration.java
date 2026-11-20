@@ -1,23 +1,29 @@
 package com.mediflow.agent.config;
 
 import java.time.Clock;
+import java.time.Duration;
+import java.util.List;
 
 import com.mediflow.agent.agent.AgentRuntime;
 import com.mediflow.agent.agent.AgentRuntimeService;
+import com.mediflow.agent.agent.AgentCallPolicy;
 import com.mediflow.agent.agent.AppointmentApplicationService;
+import com.mediflow.agent.agent.AppointmentOptions;
+import com.mediflow.agent.agent.CompositeReadToolExecutor;
 import com.mediflow.agent.agent.DecisionModel;
 import com.mediflow.agent.agent.DepartmentCatalog;
 import com.mediflow.agent.agent.ReadToolExecutor;
-import com.mediflow.agent.agent.StreamingReplyService;
 import com.mediflow.agent.agent.TaskStateStore;
+import com.mediflow.agent.appointment.MySqlReadToolExecutor;
+import com.mediflow.agent.knowledge.KnowledgeReadToolExecutor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
-import dev.langchain4j.model.openai.OpenAiStreamingChatModel;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 import org.springframework.context.annotation.Profile;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
@@ -31,7 +37,8 @@ public class AgentRuntimeConfiguration {
             ObjectMapper objectMapper, Clock agentClock,
             @Value("${mediflow.llm.api-key:}") String apiKey,
             @Value("${mediflow.llm.base-url:https://api.deepseek.com/v1}") String baseUrl,
-            @Value("${mediflow.llm.model:deepseek-chat}") String modelName) {
+            @Value("${mediflow.llm.model:deepseek-chat}") String modelName,
+            @Value("${mediflow.agent.model-timeout-ms:15000}") long modelTimeoutMs) {
         if (apiKey == null || apiKey.isBlank()) {
             return new DemoDecisionModel();
         }
@@ -41,6 +48,8 @@ public class AgentRuntimeConfiguration {
                 .modelName(modelName)
                 .temperature(0.1)
                 .maxTokens(1200)
+                .timeout(Duration.ofMillis(modelTimeoutMs))
+                .maxRetries(0)
                 .strictTools(false)
                 .logRequests(false)
                 .logResponses(false)
@@ -49,22 +58,22 @@ public class AgentRuntimeConfiguration {
     }
 
     @Bean
-    StreamingReplyService streamingReplyService(
-            @Value("${mediflow.llm.api-key:}") String apiKey,
-            @Value("${mediflow.llm.base-url:https://api.deepseek.com/v1}") String baseUrl,
-            @Value("${mediflow.llm.model:deepseek-chat}") String modelName) {
-        if (apiKey == null || apiKey.isBlank()) {
-            return new DemoStreamingReplyService();
-        }
-        return new DeepSeekStreamingReplyService(OpenAiStreamingChatModel.builder()
-                .apiKey(apiKey)
-                .baseUrl(baseUrl)
-                .modelName(modelName)
-                .temperature(0.1)
-                .maxTokens(800)
-                .logRequests(false)
-                .logResponses(false)
-                .build());
+    ThreadPoolTaskExecutor agentCallExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(8);
+        executor.setMaxPoolSize(8);
+        // Bounded, with no queue of abandoned requests when a downstream ignores interruption.
+        executor.setQueueCapacity(0);
+        executor.setThreadNamePrefix("agent-call-");
+        return executor;
+    }
+
+    @Bean
+    AgentCallPolicy agentCallPolicy(ThreadPoolTaskExecutor agentCallExecutor,
+            @Value("${mediflow.agent.model-timeout-ms:15000}") long modelMs,
+            @Value("${mediflow.agent.tool-timeout-ms:5000}") long toolMs,
+            @Value("${mediflow.agent.request-timeout-ms:45000}") long requestMs) {
+        return new AgentCallPolicy(agentCallExecutor, modelMs, toolMs, requestMs);
     }
 
     @Bean
@@ -83,14 +92,27 @@ public class AgentRuntimeConfiguration {
         return executor;
     }
 
+    /**
+     * The single read-tool entry point the runtime sees. Each executor keeps its own subject and
+     * dependencies, so the appointment tools never have to know about hospital material, or the other
+     * way round; the model simply gets one combined tool list.
+     */
+    @Bean
+    @Primary
+    ReadToolExecutor readToolExecutor(MySqlReadToolExecutor appointmentTools,
+                                     KnowledgeReadToolExecutor knowledgeTools) {
+        return new CompositeReadToolExecutor(List.of(appointmentTools, knowledgeTools));
+    }
+
     @Bean
     AgentRuntime agentRuntime(TaskStateStore stateStore, DecisionModel decisionModel,
                              ReadToolExecutor toolExecutor,
                              AppointmentApplicationService appointmentService,
                              DepartmentCatalog departmentCatalog,
-                             Clock agentClock,
+                             AppointmentOptions appointmentOptions,
+                             Clock agentClock, AgentCallPolicy calls,
                              @Value("${mediflow.agent.max-steps:8}") int maxSteps) {
         return new AgentRuntimeService(stateStore, decisionModel, toolExecutor,
-                appointmentService, maxSteps, agentClock, departmentCatalog);
+                appointmentService, maxSteps, agentClock, departmentCatalog, appointmentOptions, calls);
     }
 }

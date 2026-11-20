@@ -245,7 +245,7 @@ class AgentRuntimeServiceTest {
     }
 
     @Test
-    void occupiedSlotFailsDuringConfirmation() {
+    void occupiedSlotReturnsToSelectionDuringConfirmation() {
         appointmentService.occupySlot(30L);
         AgentRuntimeService runtime = runtime(new AgentDecision.ProposePlan(plan(), "请确认预约方案"));
         AppointmentPlan activePlan = runtime.handleMessage(taskId, OWNER, "预约")
@@ -255,7 +255,9 @@ class AgentRuntimeServiceTest {
                 taskId, OWNER, activePlan.id(), activePlan.version(), "idem-5");
 
         assertFalse(result.success());
-        assertEquals(TaskStatus.FAILED, result.status());
+        assertEquals(TaskStatus.SEARCHING, result.status());
+        assertEquals("SLOT_UNAVAILABLE", result.code());
+        assertEquals(PlanStatus.REJECTED, result.task().activePlan().orElseThrow().status());
     }
 
     @Test
@@ -268,7 +270,7 @@ class AgentRuntimeServiceTest {
         ConfirmationResult repeated = runtime.confirmPlan(
                 taskId, OWNER, activePlan.id(), activePlan.version(), "idem-6");
 
-        assertFalse(repeated.success());
+        assertTrue(repeated.success());
         assertEquals(1, appointmentService.createdAppointmentCount());
     }
 

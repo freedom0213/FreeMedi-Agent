@@ -28,10 +28,13 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mediflow.agent.agent.*;
+import com.mediflow.agent.api.MySqlTaskApplicationService;
 import com.mediflow.agent.appointment.AppointmentWriteService;
 import com.mediflow.agent.appointment.MySqlAppointmentApplicationService;
 import com.mediflow.agent.appointment.MySqlHospitalDirectory;
@@ -43,6 +46,8 @@ import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -51,11 +56,13 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockHttpSession;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
 /** Real MySQL tests. The supplied URL must point to an isolated, initially empty test schema. */
 @SpringBootTest(properties = "spring.flyway.enabled=true")
@@ -63,6 +70,8 @@ import org.springframework.test.web.servlet.MockMvc;
 @ActiveProfiles({"test", "mysql"})
 @EnabledIfSystemProperty(named = "mediflow.test.db.url", matches = ".+")
 class MySqlTaskStateStoreTest {
+    private static final String DEMO_A_PASSWORD = "Mediflow-Demo-A!2026";
+    private static final String DEMO_B_PASSWORD = "Mediflow-Demo-B!2026";
     private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-10-13T00:00:00Z"), ZoneOffset.UTC);
     /** Slot searches use the real clock, so the fixture clinic must stay ahead of today. */
     private static final LocalDate FIXTURE_DATE = LocalDate.now(ZoneId.of("Asia/Shanghai")).plusDays(5);
@@ -82,7 +91,9 @@ class MySqlTaskStateStoreTest {
     @Autowired MySqlHospitalDirectory directory;
     @Autowired MockMvc mockMvc;
     @Autowired AgentRuntime runtime;
+    @Autowired MySqlTaskApplicationService taskApplication;
 
+    private String fixtureUsername;
     private long patientId;
     private long sessionId;
     private long departmentId;
@@ -96,6 +107,7 @@ class MySqlTaskStateStoreTest {
     @DynamicPropertySource
     static void mysqlProperties(DynamicPropertyRegistry registry) {
         registry.add("mediflow.llm.api-key", () -> "");
+        registry.add("mediflow.knowledge.index", () -> "none");
         registry.add("spring.datasource.url", () -> System.getProperty("mediflow.test.db.url"));
         registry.add("spring.datasource.username", () ->
                 System.getProperty("mediflow.test.db.username", "root"));
@@ -107,11 +119,12 @@ class MySqlTaskStateStoreTest {
     @BeforeEach
     void setUp() {
         String marker = UUID.randomUUID().toString();
+        fixtureUsername = marker;
         departmentName = "测试科室-" + marker;
         doctorName = "测试医生-" + marker;
         jdbc.update("""
                 INSERT INTO sys_user(username, password_hash, display_name, role, status)
-                VALUES (?, 'synthetic-test-only', '测试患者', 'PATIENT', 'ACTIVE')
+                SELECT ?, password_hash, '测试患者', 'PATIENT', 'ACTIVE' FROM sys_user WHERE id = 1001
                 """, marker);
         patientId = jdbc.queryForObject("SELECT id FROM sys_user WHERE username = ?", Long.class, marker);
         jdbc.update("INSERT INTO agent_session(patient_id, title, status) VALUES (?, ?, 'ACTIVE')",
@@ -175,6 +188,185 @@ class MySqlTaskStateStoreTest {
     }
 
     @Test
+    void portalStatusAndRetryUseTheOriginalSlotAndKey() throws Exception {
+        MockHttpSession session = login(fixtureUsername, DEMO_A_PASSWORD);
+        String key = "s5-portal-" + UUID.randomUUID();
+        String originalBody = json.writeValueAsString(Map.of("slotId", slotId, "idempotencyKey", key));
+        mockMvc.perform(postAs(session, "/api/v1/appointments/status")
+                        .contentType(MediaType.APPLICATION_JSON).content(originalBody))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.code").value("NOT_FOUND"));
+        var created = json.readTree(mockMvc.perform(postAs(session, "/api/v1/appointments")
+                        .contentType(MediaType.APPLICATION_JSON).content(originalBody))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.outcome").value("CREATED"))
+                .andReturn().getResponse().getContentAsString());
+        String appointmentNo = created.get("appointmentNo").asText();
+        for (String path : List.of("/api/v1/appointments/status", "/api/v1/appointments")) {
+            mockMvc.perform(postAs(session, path).contentType(MediaType.APPLICATION_JSON).content(originalBody))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.appointmentNo").value(appointmentNo));
+            mockMvc.perform(postAs(session, path).contentType(MediaType.APPLICATION_JSON)
+                            .content(json.writeValueAsString(Map.of("slotId", slotId + 1, "idempotencyKey", key))))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.code").value("IDEMPOTENCY_CONFLICT"));
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?", Long.class, patientId))
+                .isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"BEFORE_COMMIT", "AFTER_COMMIT", "VERIFY"})
+    void pendingConfirmationChecksTheOriginalBeforeAnyRetry(String interruption) {
+        var writes = new java.util.concurrent.atomic.AtomicInteger();
+        var verifications = new java.util.concurrent.atomic.AtomicInteger();
+        AppointmentApplicationService fault = new AppointmentApplicationService() {
+            @Override
+            public AppointmentExecutionResult createConfirmedAppointment(AppointmentPlan selected, Principal owner, String key) {
+                int call = writes.incrementAndGet();
+                if (call == 1 && interruption.equals("BEFORE_COMMIT")) throw new IllegalStateException("did not send");
+                var result = appointmentService.createConfirmedAppointment(selected, owner, key);
+                if (call == 1 && interruption.equals("AFTER_COMMIT")) throw new IllegalStateException("lost write response");
+                return result;
+            }
+
+            @Override
+            public AppointmentVerificationResult verify(String number, Principal owner) {
+                if (verifications.incrementAndGet() == 1 && interruption.equals("VERIFY")) {
+                    throw new IllegalStateException("verification unavailable");
+                }
+                return appointmentService.verify(number, owner);
+            }
+
+            @Override
+            public java.util.Optional<AppointmentExecutionResult> findOriginal(
+                    PlanId planId, int version, Principal owner, String key) {
+                return appointmentService.findOriginal(planId, version, owner, key);
+            }
+        };
+        AgentRuntime agent = new AgentRuntimeService(store, model(new AgentDecision.ProposePlan(futurePlan(slotId),
+                "请核对预约")), readToolExecutor, fault, 5, Clock.systemUTC());
+        var plan = agent.handleMessage(taskId, principal, "预约").task().activePlan().orElseThrow();
+        String key = "s5-agent-" + UUID.randomUUID();
+        var uncertain = agent.confirmPlan(taskId, principal, plan.id(), plan.version(), key);
+        assertThat(uncertain.success()).isFalse();
+        assertThat(uncertain.code()).isEqualTo(interruption.equals("VERIFY") ? "VERIFY_PENDING" : "OUTCOME_UNKNOWN");
+        assertThat(agent.checkConfirmation(taskId, principal, plan.id(), plan.version(), key + "x").code())
+                .isEqualTo("IDEMPOTENCY_CONFLICT");
+        var checked = agent.checkConfirmation(taskId, principal, plan.id(), plan.version(), key);
+        assertThat(writes.get()).isEqualTo(1);
+        if (interruption.equals("BEFORE_COMMIT")) {
+            assertThat(checked.code()).isEqualTo("NOT_FOUND");
+            assertThat(agent.confirmPlan(taskId, principal, plan.id(), plan.version(), key).code()).isEqualTo("NOT_FOUND");
+            assertThat(writes.get()).isEqualTo(1);
+            checked = agent.confirmPlan(taskId, principal, plan.id(), plan.version(), key, true);
+            assertThat(writes.get()).isEqualTo(2);
+        }
+        assertThat(checked.success()).isTrue();
+        assertThat(checked.status()).isEqualTo(TaskStatus.COMPLETED);
+        assertThat(agent.confirmPlan(taskId, principal, plan.id(), plan.version(), key).task().facts()
+                .get("appointmentId")).isEqualTo(checked.task().facts().get("appointmentId"));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?", Long.class, patientId))
+                .isEqualTo(1);
+        assertThat(jdbc.queryForObject("""
+                SELECT COUNT(*) FROM operation_audit_log WHERE patient_id = ? AND result_status = 'SUCCEEDED'
+                """, Long.class, patientId)).isEqualTo(1);
+    }
+
+    @Test
+    void legacyVerificationFailureRecoversByExactPlanWithoutAKey() throws Exception {
+        AgentRuntime agent = runtime(model(new AgentDecision.ProposePlan(futurePlan(slotId), "请核对预约")));
+        var plan = agent.handleMessage(taskId, principal, "预约").task().activePlan().orElseThrow();
+        var legacy = store.load(taskId);
+        legacy.transitionTo(TaskStatus.EXECUTING);
+        legacy.setPlanStatus(PlanStatus.CONFIRMED);
+        store.save(legacy);
+        var booking = appointmentService.createConfirmedAppointment(plan, principal, "legacy-before-s5");
+        assertThat(booking.success()).isTrue();
+        legacy = store.load(taskId);
+        legacy.transitionTo(TaskStatus.VERIFYING);
+        legacy.putFact("appointmentId", booking.appointmentId());
+        legacy.transitionTo(TaskStatus.FAILED);
+        store.save(legacy);
+        MockHttpSession session = login(fixtureUsername, DEMO_A_PASSWORD);
+        mockMvc.perform(postAs(session, "/api/v1/tasks/{taskId}/confirm/status", taskId.value())
+                        .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(Map.of(
+                                "planId", plan.id().value(), "planVersion", plan.version()))))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.success").value(true))
+                .andExpect(jsonPath("$.task.status").value("COMPLETED"))
+                .andExpect(jsonPath("$.task.facts.appointmentId").value(booking.appointmentId()));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?",
+                Long.class, patientId)).isEqualTo(1);
+    }
+
+    @Test
+    void messageRequestIdReplaysSavedTurnWithoutAnotherToolCall() throws Exception {
+        MockHttpSession session = login(fixtureUsername, DEMO_A_PASSWORD);
+        String path = "/api/v1/tasks/{taskId}/messages";
+        String body = "{\"message\":\"就诊要带什么证件？\",\"clientRequestId\":\"same-s5-message\"}";
+        mockMvc.perform(postAs(session, path, taskId.value()).contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.task.turnCount").value(1));
+        mockMvc.perform(postAs(session, path, taskId.value()).contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.task.turnCount").value(1))
+                .andExpect(jsonPath("$.events[0].type").value("MESSAGE_REPLAYED"));
+        mockMvc.perform(postAs(session, path, taskId.value()).contentType(MediaType.APPLICATION_JSON)
+                        .content(body.replace("就诊要带什么证件？", "查另一个号源")))
+                .andExpect(status().isBadRequest());
+        assertThat(count("agent_tool_call")).isEqualTo(1);
+    }
+
+    @Test
+    void visitConsultationReusesPortalAppointmentAndIsReadOnlyForItsOwner() throws Exception {
+        var booked = appointmentWriteService.book(AppointmentWriteService.BookingCommand.forSlot(
+                new AppointmentWriteService.Actor(patientId, "PATIENT"), "visit-portal", slotId));
+        assertThat(booked.success()).isTrue();
+        String number = booked.appointmentNo();
+        var executor = Executors.newFixedThreadPool(2);
+        var start = new CyclicBarrier(2);
+        TaskId consultation;
+        try {
+            Callable<TaskId> open = () -> {
+                start.await();
+                return taskApplication.openVisitConsultation(principal, number).orElseThrow();
+            };
+            var first = executor.submit(open);
+            var second = executor.submit(open);
+            consultation = first.get(15, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(second.get(15, java.util.concurrent.TimeUnit.SECONDS)).isEqualTo(consultation);
+        } finally {
+            executor.shutdownNow();
+        }
+        MockHttpSession owner = login(fixtureUsername, DEMO_A_PASSWORD);
+        MockHttpSession other = login("demo-patient-b", DEMO_B_PASSWORD);
+        String id = consultation.value();
+        mockMvc.perform(postAs(owner, "/api/v1/appointments/{appointmentNo}/consultation", number))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.taskId").value(id));
+        mockMvc.perform(postAs(other, "/api/v1/appointments/{appointmentNo}/consultation", number))
+                .andExpect(status().isNotFound());
+        mockMvc.perform(get("/api/v1/tasks/{taskId}", id).session(other))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(postAs(other, "/api/v1/tasks/{taskId}/messages/stream", id)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"message\":\"这次去哪儿？\"}"))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/v1/tasks/{taskId}", id).session(owner))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.taskType").value("VISIT_CONSULTATION"))
+                .andExpect(jsonPath("$.facts.visitAppointment.appointmentNo").value(number))
+                .andExpect(jsonPath("$.facts.visitAppointment.bookedVia").value("PORTAL"));
+        var factReply = runtime.handleMessage(consultation, principal, "我约的是哪位医生？");
+        assertThat(factReply.message()).contains(doctorName, departmentName, FIXTURE_DAY, "14:00-14:30", number);
+        assertThat(runtime.handleMessage(consultation, principal, "帮我再约一个号").message())
+                .contains("另一笔预约");
+        assertThat(runtime.handleMessage(consultation, principal, "这次去要带什么？").task().facts())
+                .containsKey("knowledgeReplies");
+        for (var entry : Map.of("requirements", "{}", "selection", "{\"batchId\":\"batch\",\"slotId\":1}",
+                "confirm", "{\"planId\":\"old\",\"planVersion\":1,\"idempotencyKey\":\"visit\"}").entrySet()) {
+            mockMvc.perform(postAs(owner, "/api/v1/tasks/{taskId}/" + entry.getKey(), id)
+                            .contentType(MediaType.APPLICATION_JSON).content(entry.getValue()))
+                    .andExpect(status().isForbidden());
+        }
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?",
+                Long.class, patientId)).isEqualTo(1);
+        assertThat(runtime.getTask(consultation, principal).activePlan()).isEmpty();
+    }
+
+    @Test
     void portalBookingRefusesAnUnavailableSlotAndAuditsTheRefusal() {
         jdbc.update("UPDATE appointment_slot SET status = 'RESERVED' WHERE id = ?", slotId);
 
@@ -191,6 +383,74 @@ class MySqlTaskStateStoreTest {
                 WHERE patient_id = ? AND result_status = 'REJECTED' AND result_code = 'SLOT_UNAVAILABLE'
                   AND target_type = 'APPOINTMENT_SLOT' AND target_id = ?
                 """, Long.class, patientId, slotId)).isEqualTo(1);
+    }
+
+    @ParameterizedTest(name = "portal booking rejects {0}")
+    @ValueSource(strings = {"CLOSED_SCHEDULE", "DISABLED_DOCTOR", "DISABLED_DEPARTMENT", "PAST_SLOT"})
+    void portalBookingRechecksTheClinicBeforeReservingASlot(String invalidation) {
+        invalidateFixtureClinic(invalidation);
+
+        AppointmentWriteService.BookingResult result = appointmentWriteService.book(
+                AppointmentWriteService.BookingCommand.forSlot(
+                        new AppointmentWriteService.Actor(patientId, "PATIENT"), "invalid-clinic", slotId));
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.code()).isEqualTo("SLOT_NOT_FOUND");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?", Long.class,
+                patientId)).isZero();
+        assertThat(jdbc.queryForObject("SELECT status FROM appointment_slot WHERE id = ?", String.class, slotId))
+                .isEqualTo("AVAILABLE");
+        assertThat(jdbc.queryForObject("""
+                SELECT COUNT(*) FROM operation_audit_log
+                WHERE patient_id = ? AND result_status = 'REJECTED' AND result_code = 'SLOT_NOT_FOUND'
+                  AND target_type = 'APPOINTMENT_SLOT' AND target_id = ?
+                """, Long.class, patientId, slotId)).isEqualTo(1);
+    }
+
+    @Test
+    void agentConfirmationRejectsAClinicThatClosedAfterTheProposal() {
+        PlanDraft draft = futurePlan(slotId);
+        AgentRuntime bookingRuntime = new AgentRuntimeService(store,
+                model(new AgentDecision.ProposePlan(draft, "请确认方案")),
+                new InMemoryReadToolExecutor(), appointmentService, 5, CLOCK);
+        AppointmentPlan proposed = bookingRuntime.handleMessage(taskId, principal, "预约测试科室")
+                .task().activePlan().orElseThrow();
+        invalidateFixtureClinic("CLOSED_SCHEDULE");
+
+        ConfirmationResult result = bookingRuntime.confirmPlan(
+                taskId, principal, proposed.id(), proposed.version(), "closed-after-proposal");
+
+        assertThat(result.success()).isFalse();
+        assertThat(result.message()).contains("号源已失效");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?", Long.class,
+                patientId)).isZero();
+        assertThat(jdbc.queryForObject("SELECT status FROM appointment_slot WHERE id = ?", String.class, slotId))
+                .isEqualTo("AVAILABLE");
+        assertThat(jdbc.queryForObject("""
+                SELECT COUNT(*) FROM operation_audit_log
+                WHERE patient_id = ? AND result_status = 'REJECTED' AND result_code = 'SLOT_INVALID'
+                  AND target_type = 'APPOINTMENT_SLOT' AND target_id = ?
+                """, Long.class, patientId, slotId)).isEqualTo(1);
+    }
+
+    @Test
+    void portalBookingReplaysTheOriginalResultAfterItsDepartmentIsDisabled() {
+        AppointmentWriteService.BookingCommand command = AppointmentWriteService.BookingCommand.forSlot(
+                new AppointmentWriteService.Actor(patientId, "PATIENT"), "replay-disabled-clinic", slotId);
+        AppointmentWriteService.BookingResult created = appointmentWriteService.book(command);
+        assertThat(created.outcome()).isEqualTo(AppointmentWriteService.BookingResult.Outcome.CREATED);
+        invalidateFixtureClinic("DISABLED_DEPARTMENT");
+
+        AppointmentWriteService.BookingResult replayed = appointmentWriteService.book(command);
+
+        assertThat(replayed.outcome()).isEqualTo(AppointmentWriteService.BookingResult.Outcome.EXISTING);
+        assertThat(replayed.appointmentNo()).isEqualTo(created.appointmentNo());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?", Long.class,
+                patientId)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT status FROM appointment_slot WHERE id = ?", String.class, slotId))
+                .isEqualTo("RESERVED");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM operation_audit_log WHERE patient_id = ?", Long.class,
+                patientId)).isEqualTo(1);
     }
 
     @Test
@@ -358,10 +618,10 @@ class MySqlTaskStateStoreTest {
 
     @Test
     void httpPortalBookingCreatesAndReplaysAnAppointment() throws Exception {
+        MockHttpSession session = login(fixtureUsername, DEMO_A_PASSWORD);
         String key = "portal-http-" + UUID.randomUUID();
         String body = "{\"slotId\":" + slotId + ",\"idempotencyKey\":\"" + key + "\"}";
-        var created = mockMvc.perform(post("/api/v1/appointments")
-                        .header("X-Demo-User-Id", String.valueOf(patientId))
+        var created = mockMvc.perform(postAs(session, "/api/v1/appointments")
                         .contentType(MediaType.APPLICATION_JSON).content(body))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.success").value(true))
@@ -374,15 +634,14 @@ class MySqlTaskStateStoreTest {
                 WHERE patient_id = ? AND plan_id IS NULL AND booked_via = 'PORTAL'
                 """, Long.class, patientId)).isEqualTo(1);
 
-        mockMvc.perform(post("/api/v1/appointments")
-                        .header("X-Demo-User-Id", String.valueOf(patientId))
+        mockMvc.perform(postAs(session, "/api/v1/appointments")
                         .contentType(MediaType.APPLICATION_JSON).content(body))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.outcome").value("EXISTING"))
                 .andExpect(jsonPath("$.appointmentNo").value(appointmentNo));
 
         mockMvc.perform(get("/api/v1/appointments/mine")
-                        .header("X-Demo-User-Id", String.valueOf(patientId)))
+                        .session(session))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.length()").value(1))
                 .andExpect(jsonPath("$[0].appointmentNo").value(appointmentNo))
@@ -390,7 +649,7 @@ class MySqlTaskStateStoreTest {
                 .andExpect(jsonPath("$[0].timeRange").value("14:00-14:30"));
 
         mockMvc.perform(get("/api/v1/appointments/" + appointmentNo)
-                        .header("X-Demo-User-Id", String.valueOf(patientId)))
+                        .session(session))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.departmentName").value(departmentName))
                 .andExpect(jsonPath("$.doctorName").value(doctorName));
@@ -398,33 +657,26 @@ class MySqlTaskStateStoreTest {
 
     @Test
     void anotherPatientCannotSeeOrBookSomeoneElsesAppointment() throws Exception {
+        MockHttpSession session = login(fixtureUsername, DEMO_A_PASSWORD);
         String key = "portal-isolation-" + UUID.randomUUID();
-        var created = mockMvc.perform(post("/api/v1/appointments")
-                        .header("X-Demo-User-Id", String.valueOf(patientId))
+        var created = mockMvc.perform(postAs(session, "/api/v1/appointments")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"slotId\":" + slotId + ",\"idempotencyKey\":\"" + key + "\"}"))
                 .andExpect(status().isOk())
                 .andReturn();
         String appointmentNo = json.readTree(created.getResponse().getContentAsString())
                 .get("appointmentNo").asText();
-        String otherMarker = UUID.randomUUID().toString();
-        jdbc.update("""
-                INSERT INTO sys_user(username, password_hash, display_name, role, status)
-                VALUES (?, 'synthetic-test-only', '其他患者', 'PATIENT', 'ACTIVE')
-                """, otherMarker);
-        long otherPatient = jdbc.queryForObject("SELECT id FROM sys_user WHERE username = ?",
-                Long.class, otherMarker);
+        MockHttpSession otherSession = login("demo-patient-b", DEMO_B_PASSWORD);
 
         mockMvc.perform(get("/api/v1/appointments/mine")
-                        .header("X-Demo-User-Id", String.valueOf(otherPatient)))
+                        .session(otherSession).header("X-Demo-User-Id", String.valueOf(patientId)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.length()").value(0));
         mockMvc.perform(get("/api/v1/appointments/" + appointmentNo)
-                        .header("X-Demo-User-Id", String.valueOf(otherPatient)))
+                        .session(otherSession).header("X-Demo-User-Id", String.valueOf(patientId)))
                 .andExpect(status().isNotFound());
         // The other patient cannot take the already booked slot either.
-        mockMvc.perform(post("/api/v1/appointments")
-                        .header("X-Demo-User-Id", String.valueOf(otherPatient))
+        mockMvc.perform(postAs(otherSession, "/api/v1/appointments")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"slotId\":" + slotId + ",\"idempotencyKey\":\"other-"
                                 + UUID.randomUUID() + "\"}"))
@@ -434,24 +686,60 @@ class MySqlTaskStateStoreTest {
     }
 
     @Test
+    void patientSessionRequiresCredentialsAndCsrfAndIsInvalidatedOnLogout() throws Exception {
+        mockMvc.perform(get("/api/v1/tasks/{taskId}", taskId.value())
+                        .header("X-Demo-User-Id", String.valueOf(patientId)))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/v1/appointments/mine"))
+                .andExpect(status().isUnauthorized());
+
+        MockHttpSession anonymous = new MockHttpSession();
+        postLogin(anonymous, "demo-patient", "wrong-password")
+                .andExpect(status().isUnauthorized());
+        postLogin(anonymous, "demo-admin", DEMO_A_PASSWORD)
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(get("/api/v1/auth/session").session(anonymous))
+                .andExpect(status().isUnauthorized());
+        mockMvc.perform(postAs(anonymous, "/api/v1/tasks"))
+                .andExpect(status().isUnauthorized());
+
+        MockHttpSession authenticated = login("demo-patient", DEMO_A_PASSWORD);
+        mockMvc.perform(get("/api/v1/auth/session").session(authenticated))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.patientId").value("1001"))
+                .andExpect(jsonPath("$.passwordHash").doesNotExist());
+        mockMvc.perform(post("/api/v1/appointments").session(authenticated)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("slotId", slotId, "idempotencyKey", "missing-csrf"))))
+                .andExpect(status().isForbidden());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE slot_id = ?", Long.class, slotId))
+                .isZero();
+        mockMvc.perform(post("/api/v1/auth/logout").session(authenticated))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(postAs(authenticated, "/api/v1/auth/logout"))
+                .andExpect(status().isNoContent());
+        assertThat(authenticated.isInvalid()).isTrue();
+        mockMvc.perform(get("/api/v1/auth/session").session(authenticated))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
     void httpPortalBookingReportsAConflictAndRejectsAnIncompleteRequest() throws Exception {
+        MockHttpSession session = login(fixtureUsername, DEMO_A_PASSWORD);
         String unusable = "{\"slotId\":" + slotId + ",\"idempotencyKey\":\"conflict-" + patientId + "\"}";
         jdbc.update("UPDATE appointment_slot SET status = 'RESERVED' WHERE id = ?", slotId);
 
-        mockMvc.perform(post("/api/v1/appointments")
-                        .header("X-Demo-User-Id", String.valueOf(patientId))
+        mockMvc.perform(postAs(session, "/api/v1/appointments")
                         .contentType(MediaType.APPLICATION_JSON).content(unusable))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.success").value(false))
                 .andExpect(jsonPath("$.code").value("SLOT_UNAVAILABLE"));
 
-        mockMvc.perform(post("/api/v1/appointments")
-                        .header("X-Demo-User-Id", String.valueOf(patientId))
+        mockMvc.perform(postAs(session, "/api/v1/appointments")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"slotId\":" + slotId + "}"))
                 .andExpect(status().isBadRequest());
-        mockMvc.perform(post("/api/v1/appointments")
-                        .header("X-Demo-User-Id", String.valueOf(patientId))
+        mockMvc.perform(postAs(session, "/api/v1/appointments")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"slotId\":" + slotId + ",\"idempotencyKey\":\"" + "x".repeat(65) + "\"}"))
                 .andExpect(status().isBadRequest());
@@ -496,12 +784,111 @@ class MySqlTaskStateStoreTest {
         assertThat(count("agent_turn")).isEqualTo(2);
         assertThat(count("agent_tool_call")).isEqualTo(1);
         assertThat(count("agent_plan")).isEqualTo(1);
-        assertThat(count("agent_state_event")).isEqualTo(6);
         long rowId = mapper.findTask(taskId.value()).id();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM agent_state_event WHERE task_id = ? AND metadata IS NULL",
+                Long.class, rowId)).isEqualTo(6);
         assertThat(jdbc.queryForObject("SELECT status FROM agent_tool_call WHERE task_id = ?", String.class, rowId))
                 .isEqualTo("SUCCEEDED");
         assertThat(jdbc.queryForObject("SELECT assistant_message FROM agent_turn WHERE task_id = ? AND turn_no = 2",
                 String.class, rowId)).isEqualTo("请确认方案");
+    }
+
+    @Test
+    void modelAndToolTimeoutsNeverReenterTheAppointmentWritePath() throws Exception {
+        var modelCalls = new AtomicInteger();
+        var toolCalls = new AtomicInteger();
+        var writes = new AtomicInteger();
+        var selectedCall = new ToolCall("findAvailableSlots", Map.of("departmentId", departmentId));
+        ReadToolExecutor delayedTool = new ReadToolExecutor() {
+            @Override public List<ReadToolSpec> tools() { return readToolExecutor.tools(); }
+            @Override public ToolResult execute(ToolCall call, TaskSnapshot input) {
+                if (toolCalls.incrementAndGet() == 1) waitForTimeout();
+                return readToolExecutor.execute(call, input);
+            }
+        };
+        AppointmentApplicationService lostAfterCommit = new AppointmentApplicationService() {
+            @Override public AppointmentExecutionResult createConfirmedAppointment(
+                    AppointmentPlan plan, Principal patient, String key) {
+                writes.incrementAndGet();
+                assertThat(appointmentService.createConfirmedAppointment(plan, patient, key).success()).isTrue();
+                throw new IllegalStateException("simulated lost write response");
+            }
+
+            @Override public AppointmentVerificationResult verify(String number, Principal patient) {
+                return appointmentService.verify(number, patient);
+            }
+
+            @Override public java.util.Optional<AppointmentExecutionResult> findOriginal(
+                    PlanId planId, int version, Principal patient, String key) {
+                return appointmentService.findOriginal(planId, version, patient, key);
+            }
+        };
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            AgentRuntime testRuntime = new AgentRuntimeService(store, (input, tools) -> {
+                return switch (modelCalls.incrementAndGet()) {
+                    case 1 -> {
+                        waitForTimeout();
+                        throw new IllegalStateException("interrupted slow model");
+                    }
+                    case 2 -> new AgentDecision.CallReadTool(selectedCall);
+                    default -> new AgentDecision.ProposePlan(futurePlan(slotId), "请核对候选");
+                };
+            }, delayedTool, lostAfterCommit, 5, CLOCK, departmentCatalog, null,
+                    new AgentCallPolicy(workers, 400, 400, 4000));
+            long start = System.nanoTime();
+            final String userInput = "用于验证不会出现在追踪中的消息";
+            AgentTurnResult turn = testRuntime.handleMessage(taskId, principal, userInput);
+            assertThat(TimeUnit.NANOSECONDS.toSeconds(System.nanoTime() - start)).isLessThan(4);
+            assertThat(modelCalls.get()).isEqualTo(3);
+            assertThat(toolCalls.get()).isEqualTo(2);
+            assertThat(writes.get()).isZero();
+            assertThat(countAppointmentsForPatient()).isZero();
+
+            AppointmentPlan plan = turn.task().activePlan().orElseThrow();
+            String key = "s5-confirm-recovery-key";
+            assertThat(testRuntime.confirmPlan(taskId, principal, plan.id(), plan.version(), key).code())
+                    .isEqualTo("OUTCOME_UNKNOWN");
+            assertThat(countAppointmentsForPatient()).isEqualTo(1);
+            var recovered = testRuntime.checkConfirmation(taskId, principal, plan.id(), plan.version(), key);
+            assertThat(recovered.success()).isTrue();
+            var replay = testRuntime.confirmPlan(taskId, principal, plan.id(), plan.version(), key, true);
+            assertThat(replay.task().facts().get("appointmentId")).isEqualTo(recovered.task().facts().get("appointmentId"));
+            assertThat(writes.get()).isEqualTo(1);
+            assertThat(countAppointmentsForPatient()).isEqualTo(1);
+
+            MockHttpSession owner = login(fixtureUsername, DEMO_A_PASSWORD);
+            String trace = mockMvc.perform(get("/api/v1/tasks/{taskId}/trace", taskId.value()).session(owner))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.taskId").value(taskId.value()))
+                    .andReturn().getResponse().getContentAsString();
+            var entries = new java.util.ArrayList<com.fasterxml.jackson.databind.JsonNode>();
+            json.readTree(trace).path("entries").forEach(entries::add);
+            assertThat(entries.stream().filter(entry -> entry.path("type").asText().equals("MODEL_DECISION"))
+                    .map(entry -> entry.path("action").path("attempt").asInt())).containsExactly(1, 2, 1);
+            assertThat(entries.stream().map(entry -> entry.path("reason").asText(""))
+                    .filter(reason -> reason.endsWith("_TIMEOUT"))).containsExactly("MODEL_TIMEOUT", "TOOL_TIMEOUT");
+            assertThat(entries.stream().filter(entry -> entry.path("type").asText().equals("READ_TOOL_ATTEMPT"))
+                    .map(entry -> entry.at("/action/summary/tool").asText()))
+                    .containsExactly("findAvailableSlots", "findAvailableSlots");
+            assertThat(trace).contains("durationMs", "APPOINTMENT_LOOKUP", "APPOINTMENT_VERIFY")
+                    .doesNotContain(userInput, key);
+        } finally {
+            workers.shutdownNow();
+        }
+    }
+
+    private static void waitForTimeout() {
+        try {
+            Thread.sleep(30_000);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Simulated dependency interrupted", interrupted);
+        }
+    }
+
+    private long countAppointmentsForPatient() {
+        return jdbc.queryForObject("SELECT COUNT(*) FROM appointment WHERE patient_id = ?", Long.class, patientId);
     }
 
     @Test
@@ -719,8 +1106,10 @@ class MySqlTaskStateStoreTest {
 
     @Test
     void readToolAcceptsChineseDateAndPeriodWithoutAskingPatientForFormats() {
+        // Keep the patient's wording aligned with the rolling fixture, including across year boundaries.
+        String chineseFixtureDate = FIXTURE_DATE.getMonthValue() + "月" + FIXTURE_DATE.getDayOfMonth() + "号";
         ToolResult result = readToolExecutor.execute(new ToolCall("findAvailableSlots", Map.of(
-                "departmentId", departmentId, "appointmentDate", "10月21号", "clinicPeriod", "下午")),
+                "departmentId", departmentId, "appointmentDate", chineseFixtureDate, "clinicPeriod", "下午")),
                 store.load(taskId).snapshot());
 
         assertThat(result.success()).isTrue();
@@ -763,6 +1152,7 @@ class MySqlTaskStateStoreTest {
 
         assertThat(result.success()).isTrue();
         assertThat(result.data()).containsEntry("confirmationRequired", true)
+                .containsEntry("cancelSupported", false).containsEntry("rescheduleSupported", false)
                 .containsEntry("syntheticData", true);
     }
 
@@ -799,9 +1189,83 @@ class MySqlTaskStateStoreTest {
     }
 
     @Test
+    void pageAndConversationShareRequirementsAndOnlyChangesInvalidateThePlan() throws Exception {
+        MockHttpSession session = login(fixtureUsername, DEMO_A_PASSWORD);
+        String id = taskId.value();
+        var initial = json.readTree(mockMvc.perform(postAs(session, "/api/v1/tasks/{taskId}/requirements", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("departmentId", departmentId, "doctorId", doctorId,
+                                "appointmentDate", FIXTURE_DAY))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PROPOSAL_READY"))
+                .andExpect(jsonPath("$.task.facts.candidateBatch.slots.length()").value(1))
+                .andExpect(jsonPath("$.task.activePlan").isEmpty())
+                .andReturn().getResponse().getContentAsString());
+        String oldBatch = initial.at("/task/facts/candidateBatch/id").asText();
+        long taskRowId = mapper.findTask(id).id();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM agent_plan WHERE task_id = ?", Long.class, taskRowId))
+                .isZero();
+
+        mockMvc.perform(postAs(session, "/api/v1/tasks/{taskId}/messages", id)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"message\":\"必须上午\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("NEED_MORE_INFO"))
+                .andExpect(jsonPath("$.task.facts.requirements.appointmentDate").value(FIXTURE_DAY))
+                .andExpect(jsonPath("$.task.facts.requirements.doctorId").value(doctorId))
+                .andExpect(jsonPath("$.task.facts.candidateBatch.slots.length()").value(0));
+        var next = json.readTree(mockMvc.perform(postAs(session, "/api/v1/tasks/{taskId}/messages", id)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"message\":\"上午优先，其他时段也可以\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.task.facts.requirements.sources.clinicPeriod").value("CONVERSATION"))
+                .andExpect(jsonPath("$.task.facts.candidateBatch.slots[0].differences[0]").value("时段不同"))
+                .andExpect(jsonPath("$.task.facts.candidateBatch.slots[0].appointmentDate").value(FIXTURE_DAY))
+                .andReturn().getResponse().getContentAsString());
+        String batch = next.at("/task/facts/candidateBatch/id").asText();
+        for (var invalid : List.of(Map.of("batchId", oldBatch, "slotId", slotId),
+                Map.of("batchId", batch, "slotId", 999999))) {
+            mockMvc.perform(postAs(session, "/api/v1/tasks/{taskId}/selection", id)
+                            .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(invalid)))
+                    .andExpect(status().isBadRequest());
+        }
+        mockMvc.perform(postAs(session, "/api/v1/tasks/{taskId}/selection", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("batchId", batch, "slotId", slotId))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("AWAITING_CONFIRMATION"));
+        AppointmentPlan selected = runtime.getTask(taskId, principal).activePlan().orElseThrow();
+
+        for (String message : List.of("就诊要准备什么材料？", "好的", "请查号")) {
+            mockMvc.perform(postAs(session, "/api/v1/tasks/{taskId}/messages", id)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(json.writeValueAsString(Map.of("message", message))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.status").value("AWAITING_CONFIRMATION"))
+                    .andExpect(jsonPath("$.task.activePlan.version").value(selected.version()));
+        }
+        mockMvc.perform(get("/api/v1/tasks/{taskId}", id).session(session))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.facts.knowledgeReplies['3'].status").value("UNAVAILABLE"))
+                .andExpect(jsonPath("$.facts.knowledgeReplies['3'].sources").isEmpty())
+                .andExpect(jsonPath("$.activePlan.version").value(selected.version()));
+        assertThat(jdbc.queryForObject("SELECT status FROM appointment_slot WHERE id = ?", String.class, slotId))
+                .isEqualTo("AVAILABLE");
+
+        mockMvc.perform(postAs(session, "/api/v1/tasks/{taskId}/requirements", id)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"clinicPeriod\":\"AFTERNOON\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PROPOSAL_READY"))
+                .andExpect(jsonPath("$.task.activePlan.status").value("INVALIDATED"));
+        mockMvc.perform(postAs(session, "/api/v1/tasks/{taskId}/confirm", id)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("planId", selected.id().value(),
+                                "planVersion", selected.version(), "idempotencyKey", "stale-s2"))))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.success").value(false));
+    }
+
+    @Test
     void httpApiCompletesDemoAppointmentAndReplaysSseEvents() throws Exception {
-        String created = mockMvc.perform(post("/api/v1/tasks")
-                        .header("X-Demo-User-Id", "1001")
+        MockHttpSession session = login("demo-patient", DEMO_A_PASSWORD);
+        String created = mockMvc.perform(postAs(session, "/api/v1/tasks")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{}"))
                 .andExpect(status().isCreated())
@@ -809,46 +1273,119 @@ class MySqlTaskStateStoreTest {
                 .andReturn().getResponse().getContentAsString();
         String apiTaskId = json.readTree(created).get("taskId").asText();
 
-        mockMvc.perform(post("/api/v1/tasks/{taskId}/messages", apiTaskId)
-                        .header("X-Demo-User-Id", "1001")
+        var search = json.readTree(mockMvc.perform(postAs(session, "/api/v1/tasks/{taskId}/messages", apiTaskId)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"message\":\"帮我预约心内科的号\"}"))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("AWAITING_CONFIRMATION"));
+                .andExpect(jsonPath("$.status").value("PROPOSAL_READY"))
+                .andExpect(jsonPath("$.task.facts.candidateBatch.slots.length()").value(3))
+                .andReturn().getResponse().getContentAsString());
+        var batch = search.at("/task/facts/candidateBatch");
+        for (int index = 0; index < 2; index++) {
+            mockMvc.perform(postAs(session, "/api/v1/tasks/{taskId}/selection", apiTaskId)
+                            .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(Map.of(
+                                    "batchId", batch.get("id").asText(),
+                                    "slotId", batch.get("slots").get(index).get("slotId").asLong()))))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.status").value("AWAITING_CONFIRMATION"));
+        }
 
         Principal demoPatient = new Principal(1001L, "PATIENT");
         AppointmentPlan apiPlan = runtime.getTask(new TaskId(apiTaskId), demoPatient)
                 .activePlan().orElseThrow();
+        assertThat(apiPlan.version()).isEqualTo(2);
+        assertThat(apiPlan.draft().slotId()).isEqualTo(batch.get("slots").get(1).get("slotId").asLong());
+        assertThat(mapper.findPlan(mapper.findTask(apiTaskId).id(), 1).status()).isEqualTo("INVALIDATED");
         String confirm = "{\"planId\":\"" + apiPlan.id().value()
                 + "\",\"planVersion\":" + apiPlan.version()
                 + ",\"idempotencyKey\":\"api-idem-1\"}";
-        mockMvc.perform(post("/api/v1/tasks/{taskId}/confirm", apiTaskId)
+
+        MockHttpSession otherSession = login("demo-patient-b", DEMO_B_PASSWORD);
+        mockMvc.perform(postAs(otherSession, "/api/v1/tasks/{taskId}/requirements", apiTaskId)
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(postAs(otherSession, "/api/v1/tasks/{taskId}/selection", apiTaskId)
+                        .contentType(MediaType.APPLICATION_JSON).content(json.writeValueAsString(Map.of(
+                                "batchId", batch.get("id").asText(), "slotId", apiPlan.draft().slotId()))))
+                .andExpect(status().isForbidden());
+        for (String path : List.of("/api/v1/tasks/{taskId}", "/api/v1/tasks/{taskId}/events",
+                "/api/v1/tasks/{taskId}/trace")) {
+            mockMvc.perform(get(path, apiTaskId).session(otherSession).header("X-Demo-User-Id", "1001"))
+                    .andExpect(status().isForbidden());
+        }
+        mockMvc.perform(get("/api/v1/tasks/{taskId}/trace", apiTaskId))
+                .andExpect(status().isUnauthorized());
+        for (String path : List.of("/api/v1/tasks/{taskId}/messages", "/api/v1/tasks/{taskId}/messages/stream")) {
+            mockMvc.perform(postAs(otherSession, path, apiTaskId).header("X-Demo-User-Id", "1001")
+                            .contentType(MediaType.APPLICATION_JSON).content("{\"message\":\"切换号源\"}"))
+                    .andExpect(status().isForbidden());
+        }
+        mockMvc.perform(postAs(otherSession, "/api/v1/tasks/{taskId}/confirm", apiTaskId)
                         .header("X-Demo-User-Id", "1001")
+                        .contentType(MediaType.APPLICATION_JSON).content(confirm))
+                .andExpect(status().isForbidden());
+        assertThat(jdbc.queryForObject("""
+                SELECT COUNT(*) FROM appointment a JOIN agent_plan p ON p.id = a.plan_id WHERE p.plan_no = ?
+                """, Long.class, apiPlan.id().value())).isZero();
+
+        mockMvc.perform(get("/api/v1/tasks/{taskId}", apiTaskId).session(session))
+                .andExpect(status().isOk());
+        mockMvc.perform(postAs(session, "/api/v1/tasks/{taskId}/confirm", apiTaskId)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(confirm))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.success").value(true));
+        TaskSnapshot original = runtime.getTask(new TaskId(apiTaskId), demoPatient);
+        String bookedNumber = original.facts().get("appointmentId").toString();
+        String consultId = json.readTree(mockMvc.perform(postAs(session,
+                        "/api/v1/appointments/{appointmentNo}/consultation", bookedNumber))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString()).get("taskId").asText();
+        assertThat(consultId).isNotEqualTo(apiTaskId);
+        runtime.handleMessage(new TaskId(consultId), demoPatient, "这次是什么就诊时间？");
+        assertThat(runtime.getTask(new TaskId(apiTaskId), demoPatient)).isEqualTo(original);
 
         mockMvc.perform(get("/api/v1/tasks/{taskId}/events", apiTaskId)
-                        .header("X-Demo-User-Id", "1001")
+                        .session(session)
                         .accept(MediaType.TEXT_EVENT_STREAM))
                 .andExpect(status().isOk())
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("READ_TOOL_SUCCEEDED")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("STREAM_COMPLETED")));
     }
 
+    private MockHttpSession login(String username, String password) throws Exception {
+        MockHttpSession anonymous = new MockHttpSession();
+        String beforeLogin = anonymous.getId();
+        var response = postLogin(anonymous, username, password).andExpect(status().isNoContent()).andReturn();
+        MockHttpSession authenticated = (MockHttpSession) response.getRequest().getSession(false);
+        assertThat(authenticated).isNotNull();
+        assertThat(authenticated.getId()).isNotEqualTo(beforeLogin);
+        return authenticated;
+    }
+
+    private org.springframework.test.web.servlet.ResultActions postLogin(
+            MockHttpSession session, String username, String password) throws Exception {
+        return mockMvc.perform(postAs(session, "/api/v1/auth/login")
+                .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                .param("username", username).param("password", password));
+    }
+
+    private MockHttpServletRequestBuilder postAs(MockHttpSession session, String path, Object... vars) throws Exception {
+        var csrf = json.readTree(mockMvc.perform(get("/api/v1/auth/csrf").session(session))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString());
+        return post(path, vars).session(session).header(csrf.get("headerName").asText(), csrf.get("token").asText());
+    }
+
     @Test
     void httpApiStreamsPatientReplyAndReturnsFinalBusinessResult() throws Exception {
-        String created = mockMvc.perform(post("/api/v1/tasks")
-                        .header("X-Demo-User-Id", "1001")
+        MockHttpSession session = login("demo-patient", DEMO_A_PASSWORD);
+        String created = mockMvc.perform(postAs(session, "/api/v1/tasks")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{}"))
                 .andExpect(status().isCreated())
                 .andReturn().getResponse().getContentAsString();
         String apiTaskId = json.readTree(created).get("taskId").asText();
 
-        var streamRequest = mockMvc.perform(post("/api/v1/tasks/{taskId}/messages/stream", apiTaskId)
-                        .header("X-Demo-User-Id", "1001")
+        var streamRequest = mockMvc.perform(postAs(session, "/api/v1/tasks/{taskId}/messages/stream", apiTaskId)
                         .contentType(MediaType.APPLICATION_JSON)
                         .accept(MediaType.TEXT_EVENT_STREAM)
                         .content("{\"message\":\"我最近头疼，想先看看该挂哪个科室\"}"))
@@ -856,9 +1393,18 @@ class MySqlTaskStateStoreTest {
                 .andReturn();
         mockMvc.perform(asyncDispatch(streamRequest))
                 .andExpect(status().isOk())
+                .andExpect(result -> assertThat(result.getResponse().getCharacterEncoding()).isEqualToIgnoringCase("UTF-8"))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("MESSAGE_DELTA")))
                 .andExpect(content().string(org.hamcrest.Matchers.containsString("RESULT")))
-                .andExpect(content().string(org.hamcrest.Matchers.containsString("NEED_MORE_INFO")));
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("NEED_MORE_INFO")))
+                .andExpect(result -> {
+                    String saved = runtime.getTask(new TaskId(apiTaskId), new Principal(1001, "PATIENT"))
+                            .turns().get(0).assistantMessage();
+                    String stream = result.getResponse().getContentAsString(java.nio.charset.StandardCharsets.UTF_8);
+                    String delta = stream.lines().dropWhile(line -> !line.equals("event:MESSAGE_DELTA"))
+                            .skip(1).findFirst().orElseThrow().substring("data:".length());
+                    assertThat(json.readTree(delta).path("text").asText()).isEqualTo(saved);
+                });
     }
 
     private boolean saveAfterBarrier(TaskContext context, CyclicBarrier start) throws Exception {
@@ -892,7 +1438,26 @@ class MySqlTaskStateStoreTest {
     }
 
     private PlanDraft futurePlan(long targetSlotId) {
-        return new PlanDraft(patientId, departmentId, doctorId, targetSlotId, LocalDate.of(2027, 1, 15),
-                "14:00-14:30", Instant.parse("2027-01-01T00:00:00Z"));
+        // The real MySQL write service checks wall-clock expiry, unlike the fixed-clock state tests.
+        return new PlanDraft(patientId, departmentId, doctorId, targetSlotId, FIXTURE_DATE,
+                "14:00-14:30", Instant.now().plusSeconds(3600));
+    }
+
+    private void invalidateFixtureClinic(String invalidation) {
+        switch (invalidation) {
+            case "CLOSED_SCHEDULE" -> jdbc.update(
+                    "UPDATE doctor_schedule SET status = 'CLOSED' WHERE doctor_id = ?", doctorId);
+            case "DISABLED_DOCTOR" -> jdbc.update(
+                    "UPDATE doctor SET status = 'DISABLED' WHERE id = ?", doctorId);
+            case "DISABLED_DEPARTMENT" -> jdbc.update(
+                    "UPDATE department SET status = 'DISABLED' WHERE id = ?", departmentId);
+            case "PAST_SLOT" -> jdbc.update("""
+                    UPDATE appointment_slot
+                    SET start_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 1 HOUR),
+                        end_at = DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 30 MINUTE)
+                    WHERE id = ?
+                    """, slotId);
+            default -> throw new IllegalArgumentException("unknown fixture invalidation: " + invalidation);
+        }
     }
 }

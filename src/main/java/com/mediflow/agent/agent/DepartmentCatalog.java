@@ -10,4 +10,6 @@ package com.mediflow.agent.agent;
 @FunctionalInterface
 public interface DepartmentCatalog {
     long findActiveDepartmentId(String departmentName);
+
+    default long findActiveDepartmentIdMentionedIn(String question) { return 0L; }
 }

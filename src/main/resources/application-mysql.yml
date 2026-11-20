@@ -5,3 +5,12 @@ spring:
     locations: classpath:db/migration
     clean-disabled: true
     baseline-on-migrate: false
+
+server:
+  servlet:
+    session:
+      timeout: 30m
+      tracking-modes: cookie
+      cookie:
+        http-only: true
+        same-site: lax

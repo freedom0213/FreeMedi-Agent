@@ -16,11 +16,13 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.mediflow.agent.agent.AgentDecision;
 import com.mediflow.agent.agent.DecisionContext;
 import com.mediflow.agent.agent.DecisionModel;
+import com.mediflow.agent.agent.KnowledgeConsultation;
 import com.mediflow.agent.agent.PlanDraft;
 import com.mediflow.agent.agent.ReadToolSpec;
 import com.mediflow.agent.agent.ToolCall;
 import com.mediflow.agent.agent.TriageRecommendation;
 import com.mediflow.agent.agent.ModelDecisionException;
+import com.mediflow.agent.knowledge.HospitalKnowledgeQuestion;
 import static com.mediflow.agent.agent.ModelDecisionException.Reason.*;
 
 import dev.langchain4j.agent.tool.JsonSchemaProperty;
@@ -30,6 +32,7 @@ import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatLanguageModel;
+import dev.ai4j.openai4j.OpenAiHttpException;
 
 /** Maps DeepSeek tool calls and constrained JSON decisions into the AgentRuntime protocol. */
 public final class DeepSeekDecisionModel implements DecisionModel {
@@ -43,16 +46,18 @@ public final class DeepSeekDecisionModel implements DecisionModel {
             咳嗽、喘息、咽痛等呼吸道症状可建议呼吸内科；头痛、头晕等可建议神经内科；腹痛、胃痛等可建议消化内科；胸闷、心悸可建议心内科；皮疹、瘙痒可建议皮肤科；不确定时建议全科医学科。若用户描述呼吸困难、持续胸痛、意识不清等急症信号，提醒立即联系急救/前往急诊，不要继续预约流程。
             若用户接受建议或明确科室，医生和时段均为可选条件。日期和时段也可以缺省：用户希望尽快、最近或未指定日期时，查询该科室最早的可用号源；未指定时段时不要追问时段。
             不得为查询而主动追问医生偏好；没有指定医生就直接查询该科室。患者要求最近/最早/尽快时，不得将医生、日期、时段作为缺失信息阻塞查询。
-            用户指定日期/时段后使用这些条件查询。若没有匹配号源，主动扩大查询范围：先保留同科室和已指定时段、移除指定日期；仍无结果时再移除时段，找最近可用号源。向用户说明这是替代时间并让其选择/确认，禁止静默创建预约。
+            用户指定日期或时段时，默认查询严格条件。只有患者明确说优先、最好、没号可以替代等，才允许相应日期或时段放宽。科室和医生不得自动更换。
             用户提供科室名或医生名时，使用 departmentName 或 doctorName 查询；绝不能向用户索取数据库 ID。不知道科室 ID 时省略 ID 参数，使用 departmentName。
             号源结果只能选择真实返回的记录。工具结果为空时可以说明暂时没有可用号源并询问是否扩大日期范围，不得捏造医生、号源或结果。
-            工具自动搜索备选号源时会标记 exactMatch=false，notice 会说明变化；必须向患者解释原日期/时段没有号，并说清推荐的替代日期和时段，不能声称完全符合原条件。搜索范围是未来90天，不能把范围外的日期描述为已查询。
+            搜索范围是未来90天，不能把范围外的日期描述为已查询。查询后由后端呈现候选及条件差异。
             每次只调用一个工具。需要规则时先查规则再查号源；用户提供的信息及已接受的科室方向要沿用，不能反复问已经回答过的问题。
-            如果工具结果中有合适号源，可提出其中一个候选号源形成方案。回复明确提醒患者“请核对下方方案，点击确认预约后才会提交”。患者可继续提出调整需求；普通聊天中的“确认”不能替代界面按钮，不能据此声称已预约。
+            当前已保存的 requirements 是权威需求，以它为准，不要从历史消息复原已修改的条件。调用 findAvailableSlots 只传本轮新提供或明确改动的字段；未传字段继续沿用。明确取消某个条件时给相应名称、日期或时段传空字符串。指定日期为优先时传 dateFlexible=true，指定时段为优先时传 periodFlexible=true；明确要求必须时给对应标记传 false。
+            预约意图或条件变动时调用 findAvailableSlots。明确就诊医生但无科室时，可只提供医生名。如果只补充日期或时段，也调用此工具保存条件。
+            让患者在页面比较并选择候选。询问就诊准备、就诊须知、证件、取号、预约规定或取消入口时，调用 searchHospitalKnowledge。它是只读咨询，系统会自行返回可核对的来源或说明查不到；不要引用常识补内容，不要调用查号工具改动已保存的条件。单纯询问候选理由时返回 REPLY。对话中的“确认”应提示在页面选中候选并点击确认。
+            患者询问某位医生的专长、专业方向、接诊范围，或院内某科室的服务介绍时，调用 searchHospitalKnowledge，保留问题中的科室和医生名字。资料由系统核对，只能用于了解接诊范围，不能用来排名、诊断或推断实时排班。
             除工具调用外，严格返回单个 JSON 对象，不要 Markdown：
             {"type":"ASK_USER","question":"...","missingFields":["appointmentDate"],"recommendation":{"departmentName":"神经内科","reason":"头痛症状通常可先由该科室评估"}}
-            {"type":"PROPOSE_PLAN","slotId":1,"departmentId":1,"doctorId":1,
-             "appointmentDate":"2027-01-15","timeRange":"14:00-14:30","message":"..."}
+            {"type":"REPLY","message":"..."}
             {"type":"FINISH","message":"..."}
             missingFields 只允许 departmentName、doctorName、appointmentDate、clinicPeriod。
             """;
@@ -81,10 +86,15 @@ public final class DeepSeekDecisionModel implements DecisionModel {
                 .filter(turn -> turn.assistantMessage() != null)
                 .forEach(turn -> {
                     messages.add(UserMessage.from(turn.userMessage()));
-                    messages.add(AiMessage.from(turn.assistantMessage()));
+                    // Historical source excerpts are view data, not conversation instructions.
+                    messages.add(AiMessage.from(KnowledgeConsultation.isConsultationTurn(context.task(), turn.turnNo())
+                            ? "上一轮医院资料咨询已处理。需要核实资料时可以重新查阅。"
+                            : turn.assistantMessage()));
                 });
+        var decisionFacts = new LinkedHashMap<>(context.task().facts());
+        decisionFacts.remove(KnowledgeConsultation.FACT_KEY);
         messages.add(UserMessage.from("当前任务状态：" + context.task().status()
-                + "\n已收集条件：" + write(context.task().facts())
+                + "\n已收集条件：" + write(decisionFacts)
                 + "\n当前用户消息：" + context.userMessage()));
         if (!context.toolResults().isEmpty()) {
             List<Map<String, Object>> results = context.toolResults().stream().map(result -> {
@@ -98,26 +108,48 @@ public final class DeepSeekDecisionModel implements DecisionModel {
             messages.add(UserMessage.from("只读工具执行结果（JSON）：" + write(results)));
         }
 
-        var toolSpecifications = specifications(tools);
-        ToolSpecification requiredTool = null;
+        boolean triageOnly = needsTriageDirection(context.userMessage());
+        if (triageOnly) {
+            messages.add(UserMessage.from("本轮先讨论就诊方向。请用 ASK_USER 给出初步科室建议或补问关键信息，"
+                    + "询问是否按该方向查号。紧急情况请按急症提示用 REPLY。"));
+        }
+        var toolSpecifications = triageOnly ? List.<ToolSpecification>of() : specifications(tools);
+        ToolSpecification profileTool = HospitalKnowledgeQuestion.isProfileQuestion(context.userMessage())
+                ? toolSpecifications.stream().filter(tool -> tool.name().equals(KnowledgeConsultation.TOOL_NAME))
+                        .findFirst().orElse(null) : null;
+        ToolSpecification requiredTool = profileTool;
         for (int attempt = 0; attempt < 2; attempt++) {
-            var response = requiredTool == null ? model.generate(messages, toolSpecifications)
-                    : model.generate(messages, requiredTool);
+            dev.langchain4j.model.output.Response<AiMessage> response;
+            try {
+                response = requiredTool == null ? model.generate(messages, toolSpecifications)
+                        : model.generate(messages, requiredTool);
+            } catch (OpenAiHttpException error) {
+                throw new ModelDecisionException(switch (error.code()) {
+                    case 401, 403 -> MODEL_AUTH_REJECTED;
+                    case 402 -> MODEL_QUOTA_REJECTED;
+                    case 408, 429, 500, 502, 503, 504 -> MODEL_TRANSIENT;
+                    default -> MODEL_PROVIDER_REJECTED;
+                });
+            }
             var aiMessage = response.content();
             try {
                 if (aiMessage == null) throw new ModelDecisionException(EMPTY_RESPONSE);
                 if (aiMessage.hasToolExecutionRequests()) {
                     var requests = aiMessage.toolExecutionRequests();
-                    if (requests.stream().anyMatch(request -> tools.stream()
+                    if (requests.stream().anyMatch(request -> toolSpecifications.stream()
                             .noneMatch(tool -> tool.name().equals(request.name())))) {
                         throw new ModelDecisionException(INVALID_TOOL_REQUEST);
                     }
                     // The runtime is sequential: execute one read and let the next step use its result.
                     var request = requests.get(0);
+                    if (profileTool != null && !profileTool.name().equals(request.name())) {
+                        throw new ModelDecisionException(INVALID_TOOL_REQUEST);
+                    }
                     return new AgentDecision.CallReadTool(new ToolCall(request.name(), readObject(request.arguments())));
                 }
+                if (profileTool != null) throw new ModelDecisionException(INVALID_TOOL_REQUEST);
                 AgentDecision decision = parseDecision(aiMessage.text(), context);
-                if (blocksExplicitNearestRequest(decision, context)) {
+                if (!triageOnly && blocksExplicitNearestRequest(decision, context)) {
                     throw new ModelDecisionException(OPTIONAL_PREFERENCE_QUESTION);
                 }
                 return decision;
@@ -137,6 +169,15 @@ public final class DeepSeekDecisionModel implements DecisionModel {
             }
         }
         throw new ModelDecisionException(INVALID_DECISION);
+    }
+
+    private static boolean needsTriageDirection(String message) {
+        if (HospitalKnowledgeQuestion.isConsultation(message)) return false;
+        if (message.matches("(?s).*(先看哪个科|先看哪科|挂哪个科|挂哪科|看什么科|挂什么科|就诊方向|分诊).*")) {
+            return true;
+        }
+        return message.matches("(?s).*(咳嗽|咽痛|头痛|头疼|头晕|腹痛|胃痛|胸闷|心悸|皮疹|瘙痒).*")
+                && !message.matches("(?s).*(科|门诊|医生|预约|挂号|查号|号源).*");
     }
 
     private static boolean blocksExplicitNearestRequest(AgentDecision decision, DecisionContext context) {
@@ -161,15 +202,23 @@ public final class DeepSeekDecisionModel implements DecisionModel {
                         .addOptionalParameter("doctorName", JsonSchemaProperty.STRING,
                                 JsonSchemaProperty.description("用户提供的医生姓名"))
                         .addOptionalParameter("appointmentDate", JsonSchemaProperty.STRING,
-                                JsonSchemaProperty.description("预约日期，格式 yyyy-MM-dd"))
+                                JsonSchemaProperty.description("预约日期，支持明天、周六或 yyyy-MM-dd。清除日期时传空字符串"))
                         .addOptionalParameter("clinicPeriod", JsonSchemaProperty.STRING,
-                                JsonSchemaProperty.description("MORNING、AFTERNOON 或 EVENING"),
-                                JsonSchemaProperty.from("enum", List.of("MORNING", "AFTERNOON", "EVENING")))
+                                JsonSchemaProperty.description("MORNING、AFTERNOON 或 EVENING。清除时段时传空字符串"))
+                        .addOptionalParameter("dateFlexible", JsonSchemaProperty.BOOLEAN,
+                                JsonSchemaProperty.description("患者明确授权时才允许改日期"))
+                        .addOptionalParameter("periodFlexible", JsonSchemaProperty.BOOLEAN,
+                                JsonSchemaProperty.description("患者明确授权时才允许改时段"))
                         .addOptionalParameter("limit", JsonSchemaProperty.INTEGER,
                                 JsonSchemaProperty.description("最多返回数量，不超过 50"))
                         .build());
             } else if ("getAppointmentRules".equals(tool.name())) {
                 result.add(ToolSpecification.builder().name(tool.name()).description(tool.description()).build());
+            } else if (KnowledgeConsultation.TOOL_NAME.equals(tool.name())) {
+                result.add(ToolSpecification.builder().name(tool.name()).description(tool.description())
+                        .addParameter("query", JsonSchemaProperty.STRING,
+                                JsonSchemaProperty.description("患者本轮提出的资料问题，保留需要核实的细节"))
+                        .build());
             }
         }
         return List.copyOf(result);
@@ -197,6 +246,7 @@ public final class DeepSeekDecisionModel implements DecisionModel {
                         Instant.now(clock).plusSeconds(600)), message, recommendation(decision.get("recommendation")));
             }
             case "FINISH" -> new AgentDecision.Finish(patientText(requiredText(decision, "message")));
+            case "REPLY" -> new AgentDecision.Reply(patientText(requiredText(decision, "message")));
             default -> throw new IllegalArgumentException("unsupported decision type");
         };
     }

@@ -13,7 +13,15 @@ public record TaskSnapshot(
         Map<String, Object> facts,
         Optional<AppointmentPlan> activePlan,
         Optional<ToolResult> lastToolResult,
-        List<TaskTurn> turns) {
+        List<TaskTurn> turns,
+        TaskType taskType) {
+
+    public TaskSnapshot(TaskId taskId, long patientId, TaskStatus status, int stepCount, int turnCount,
+                        Map<String, Object> facts, Optional<AppointmentPlan> activePlan,
+                        Optional<ToolResult> lastToolResult, List<TaskTurn> turns) {
+        this(taskId, patientId, status, stepCount, turnCount, facts, activePlan, lastToolResult, turns,
+                TaskType.APPOINTMENT_BOOKING);
+    }
 
     public TaskSnapshot {
         facts = facts == null ? Map.of() : Map.copyOf(facts);

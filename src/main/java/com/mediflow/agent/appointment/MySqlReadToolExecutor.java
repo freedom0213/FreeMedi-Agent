@@ -21,8 +21,8 @@ public final class MySqlReadToolExecutor implements ReadToolExecutor {
     private static final int DEFAULT_LIMIT = SlotQueryService.DEFAULT_LIMIT;
     private static final int MAX_LIMIT = SlotQueryService.MAX_LIMIT;
     private static final List<ReadToolSpec> TOOLS = List.of(
-            new ReadToolSpec("findAvailableSlots", "按科室、医生和可选日期/时段查询未来可用号源，无匹配时返回同科室近期替代时间"),
-            new ReadToolSpec("getAppointmentRules", "查询预约规则"));
+            new ReadToolSpec("findAvailableSlots", "更新本轮明确提供的预约条件并查询号源。仅在患者授权时允许放宽对应日期或时段"),
+            new ReadToolSpec("getAppointmentRules", "查询预约系统的技术限制。患者询问医院资料时使用 searchHospitalKnowledge"));
 
     private final SlotQueryService slotQuery;
 
@@ -89,7 +89,7 @@ public final class MySqlReadToolExecutor implements ReadToolExecutor {
      * The agent reads slots as plain JSON, so the key set and its order are part of the tool contract
      * and must stay stable for prompts and recorded tool calls.
      */
-    private static Map<String, Object> toolPayload(AvailableSlot slot) {
+    static Map<String, Object> toolPayload(AvailableSlot slot) {
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("slotId", slot.slotId());
         payload.put("departmentId", slot.departmentId());
@@ -107,7 +107,8 @@ public final class MySqlReadToolExecutor implements ReadToolExecutor {
     private Map<String, Object> rules() {
         return Map.of(
                 "advanceBookingDays", 90,
-                "cancelBeforeHours", 24,
+                "cancelSupported", false,
+                "rescheduleSupported", false,
                 "confirmationRequired", true,
                 "syntheticData", true);
     }

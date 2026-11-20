@@ -8,6 +8,7 @@ import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 import javax.sql.DataSource;
 
@@ -107,6 +108,16 @@ public final class SlotQueryService {
     }
 
     private List<AvailableSlot> query(SlotCriteria criteria, LocalDate from, LocalDate until) {
+        return query(criteria, from, until, null);
+    }
+
+    public Optional<AvailableSlot> findAvailable(long slotId) {
+        LocalDate today = today();
+        return query(new SlotCriteria(null, null, null, null, null, null, 1),
+                today, today.plusDays(SEARCH_HORIZON_DAYS), slotId).stream().findFirst();
+    }
+
+    private List<AvailableSlot> query(SlotCriteria criteria, LocalDate from, LocalDate until, Long slotId) {
         StringBuilder sql = new StringBuilder("""
                 SELECT s.id AS slot_id, d.id AS department_id, d.code AS department_code,
                        d.name AS department_name, dr.id AS doctor_id, dr.name AS doctor_name,
@@ -127,6 +138,10 @@ public final class SlotQueryService {
         params.add(Timestamp.from(Instant.now(clock)));
         params.add(from);
         params.add(until);
+        if (slotId != null) {
+            sql.append(" AND s.id = ?");
+            params.add(slotId);
+        }
         if (criteria.departmentId() != null) {
             sql.append(" AND d.id = ?");
             params.add(criteria.departmentId());

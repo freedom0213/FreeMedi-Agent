@@ -49,6 +49,11 @@ public final class KnowledgeRepository {
                 KnowledgeRepository::mapDocument, id).stream().findFirst();
     }
 
+    public Optional<KnowledgeDocument> findByContent(String docNo, String hash) {
+        return jdbc.query(DOCUMENT_COLUMNS + " WHERE doc_no = ? AND content_hash = ? ORDER BY version DESC LIMIT 1",
+                KnowledgeRepository::mapDocument, docNo, hash).stream().findFirst();
+    }
+
     public List<KnowledgeDocument> listAll() {
         return jdbc.query(DOCUMENT_COLUMNS + " ORDER BY doc_no, version", KnowledgeRepository::mapDocument);
     }

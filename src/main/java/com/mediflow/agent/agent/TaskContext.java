@@ -11,6 +11,7 @@ import java.util.UUID;
 public final class TaskContext {
     private final TaskId taskId;
     private final long patientId;
+    private final TaskType taskType;
     private final Map<String, Object> facts = new HashMap<>();
     private TaskStatus status = TaskStatus.UNDERSTANDING;
     private int stepCount;
@@ -23,18 +24,25 @@ public final class TaskContext {
     private final List<TaskTurn> turns = new ArrayList<>();
     private final List<StateTransition> pendingTransitions = new ArrayList<>();
     private final List<ToolExecution> pendingTools = new ArrayList<>();
+    private final List<TaskAction> pendingActions = new ArrayList<>();
+    private final List<AppointmentPlan> supersededPlans = new ArrayList<>();
 
     public TaskContext(TaskId taskId, long patientId) {
+        this(taskId, patientId, TaskType.APPOINTMENT_BOOKING);
+    }
+
+    private TaskContext(TaskId taskId, long patientId, TaskType taskType) {
         if (taskId == null || patientId <= 0) {
             throw new IllegalArgumentException("task context is incomplete");
         }
         this.taskId = taskId;
         this.patientId = patientId;
+        this.taskType = java.util.Objects.requireNonNull(taskType);
     }
 
     public synchronized TaskSnapshot snapshot() {
         return new TaskSnapshot(taskId, patientId, status, stepCount, turnCount, facts,
-                Optional.ofNullable(activePlan), Optional.ofNullable(lastToolResult), turns);
+                Optional.ofNullable(activePlan), Optional.ofNullable(lastToolResult), turns, taskType);
     }
 
     /** Restores committed data without producing new events or replaying transitions. */
@@ -42,7 +50,7 @@ public final class TaskContext {
         if (stateVersion < 0 || toolCallCount < 0) {
             throw new IllegalArgumentException("invalid persisted task version or tool count");
         }
-        TaskContext context = new TaskContext(snapshot.taskId(), snapshot.patientId());
+        TaskContext context = new TaskContext(snapshot.taskId(), snapshot.patientId(), snapshot.taskType());
         context.status = snapshot.status();
         context.stepCount = snapshot.stepCount();
         context.turnCount = snapshot.turnCount();
@@ -57,28 +65,38 @@ public final class TaskContext {
     }
 
     public synchronized void beginTurn(String message) {
+        beginTurn(message, false);
+    }
+
+    public synchronized void beginTurn(String message, boolean keepOptions) {
+        beginTurn(message, keepOptions, UUID.randomUUID().toString());
+    }
+
+    public synchronized void beginTurn(String message, boolean keepOptions, String requestId) {
         if (message == null || message.isBlank()) {
             throw new IllegalArgumentException("message must not be blank");
         }
         if (status == TaskStatus.NEED_MORE_INFO) {
             transitionTo(TaskStatus.UNDERSTANDING);
         }
-        if (status == TaskStatus.AWAITING_CONFIRMATION) {
+        if (status == TaskStatus.AWAITING_CONFIRMATION && !keepOptions) {
             setPlanStatus(PlanStatus.INVALIDATED);
             transitionTo(TaskStatus.SEARCHING);
         }
-        if (status != TaskStatus.UNDERSTANDING && status != TaskStatus.SEARCHING) {
+        if (status != TaskStatus.UNDERSTANDING && status != TaskStatus.SEARCHING
+                && !(keepOptions && (status == TaskStatus.PROPOSAL_READY || status == TaskStatus.AWAITING_CONFIRMATION))) {
             throw new IllegalStateException("task cannot accept a message in state " + status);
         }
         turnCount++;
         toolCallCount = 0;
-        turns.add(new TaskTurn(turnCount, UUID.randomUUID().toString(), message, null, "PROCESSING"));
+        turns.add(new TaskTurn(turnCount, requestId, message, null, "PROCESSING"));
     }
 
     public synchronized void completeTurn(String message) {
         TaskTurn turn = turns.get(turns.size() - 1);
         String turnStatus = status == TaskStatus.FAILED ? "FAILED"
                 : status == TaskStatus.NEED_MORE_INFO || status == TaskStatus.AWAITING_CONFIRMATION
+                || status == TaskStatus.PROPOSAL_READY
                 ? "WAITING_USER" : "COMPLETED";
         turns.set(turns.size() - 1, new TaskTurn(turn.turnNo(), turn.clientRequestId(),
                 turn.userMessage(), message, turnStatus));
@@ -109,11 +127,27 @@ public final class TaskContext {
         return List.copyOf(pendingTools);
     }
 
+    public synchronized void trace(String action, int attempt, String outcome, String reason,
+                                   long durationMs, Map<String, Object> summary) {
+        pendingActions.add(new TaskAction(action, status, turnCount, stepCount, attempt,
+                outcome, reason, durationMs, summary));
+    }
+
+    public synchronized List<TaskAction> pendingActions() {
+        return List.copyOf(pendingActions);
+    }
+
+    public synchronized List<AppointmentPlan> supersededPlans() {
+        return List.copyOf(supersededPlans);
+    }
+
     /** Called by the store only after the database transaction commits successfully. */
     public synchronized void acknowledgeSave(long newVersion) {
         stateVersion = newVersion;
         pendingTransitions.clear();
         pendingTools.clear();
+        pendingActions.clear();
+        supersededPlans.clear();
     }
 
     public synchronized void setPlanStatus(PlanStatus planStatus) {
@@ -127,6 +161,10 @@ public final class TaskContext {
 
     public synchronized void putFact(String key, Object value) {
         facts.put(key, value);
+    }
+
+    public synchronized void removeFact(String key) {
+        facts.remove(key);
     }
 
     public synchronized void setRecommendation(TriageRecommendation recommendation) {
@@ -151,6 +189,9 @@ public final class TaskContext {
                 ++planVersion,
                 draft,
                 PlanStatus.PROPOSED);
+        if (activePlan != null && activePlan.status() == PlanStatus.INVALIDATED) {
+            supersededPlans.add(activePlan);
+        }
         activePlan = plan;
         return plan;
     }
@@ -181,9 +222,10 @@ public final class TaskContext {
                     TaskStatus.FAILED);
             case AWAITING_CONFIRMATION -> EnumSet.of(TaskStatus.EXECUTING, TaskStatus.SEARCHING,
                     TaskStatus.FAILED, TaskStatus.CANCELLED);
-            case EXECUTING -> EnumSet.of(TaskStatus.VERIFYING, TaskStatus.FAILED);
+            case EXECUTING -> EnumSet.of(TaskStatus.VERIFYING, TaskStatus.SEARCHING, TaskStatus.FAILED);
             case VERIFYING -> EnumSet.of(TaskStatus.COMPLETED, TaskStatus.FAILED);
-            case COMPLETED, FAILED, CANCELLED -> EnumSet.noneOf(TaskStatus.class);
+            case FAILED -> EnumSet.of(TaskStatus.VERIFYING);
+            case COMPLETED, CANCELLED -> EnumSet.noneOf(TaskStatus.class);
         };
     }
 }

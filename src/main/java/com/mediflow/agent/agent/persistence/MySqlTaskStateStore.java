@@ -20,12 +20,14 @@ import com.mediflow.agent.agent.PlanDraft;
 import com.mediflow.agent.agent.PlanId;
 import com.mediflow.agent.agent.PlanStatus;
 import com.mediflow.agent.agent.StateTransition;
+import com.mediflow.agent.agent.TaskAction;
 import com.mediflow.agent.agent.TaskContext;
 import com.mediflow.agent.agent.TaskId;
 import com.mediflow.agent.agent.TaskSnapshot;
 import com.mediflow.agent.agent.TaskStateStore;
 import com.mediflow.agent.agent.TaskStatus;
 import com.mediflow.agent.agent.TaskTurn;
+import com.mediflow.agent.agent.TaskType;
 import com.mediflow.agent.agent.ToolExecution;
 import com.mediflow.agent.agent.ToolResult;
 
@@ -35,6 +37,8 @@ import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
 @Repository
@@ -57,17 +61,30 @@ public class MySqlTaskStateStore implements TaskStateStore {
 
     @Override
     public TaskId create(long sessionId, long patientId) {
+        return transactions.execute(transaction -> persistNewTask(sessionId, patientId,
+                TaskType.APPOINTMENT_BOOKING, Map.of()));
+    }
+
+    public Optional<TaskId> findVisitConsultation(long patientId, String appointmentNo) {
+        return Optional.ofNullable(mapper.findVisitConsultation(patientId, appointmentNo)).map(TaskId::new);
+    }
+
+    /** Joins the caller's transaction, which holds the appointment lock and created the session. */
+    @Transactional(propagation = Propagation.MANDATORY)
+    public TaskId createVisitConsultation(long sessionId, long patientId, Map<String, Object> appointment) {
+        return persistNewTask(sessionId, patientId, TaskType.VISIT_CONSULTATION, Map.of("visitAppointment", appointment));
+    }
+
+    private TaskId persistNewTask(long sessionId, long patientId, TaskType type, Map<String, Object> facts) {
         if (sessionId <= 0 || patientId <= 0) {
             throw new IllegalArgumentException("session and patient ids must be positive");
         }
         TaskId id = new TaskId(UUID.randomUUID().toString());
-        transactions.executeWithoutResult(transaction -> {
-            if (mapper.createTask(id.value(), sessionId, patientId) != 1) {
-                throw new SecurityException("session is not active or does not belong to current user");
-            }
-            TaskPersistenceMapper.TaskRow row = mapper.findTask(id.value());
-            mapper.insertEvent(row.id(), 1, null, TaskStatus.UNDERSTANDING.name(), "TASK_CREATED");
-        });
+        if (mapper.createTask(id.value(), sessionId, patientId, type.name(), write(facts)) != 1) {
+            throw new SecurityException("session is not active or does not belong to current user");
+        }
+        TaskPersistenceMapper.TaskRow row = mapper.findTask(id.value());
+        mapper.insertEvent(row.id(), 1, null, TaskStatus.UNDERSTANDING.name(), "TASK_CREATED");
         return id;
     }
 
@@ -90,7 +107,7 @@ public class MySqlTaskStateStore implements TaskStateStore {
                             turn.assistantMessage(), turn.status())).toList();
             TaskSnapshot snapshot = new TaskSnapshot(taskId, row.patientId(), TaskStatus.valueOf(row.status()),
                     row.stepCount(), row.currentTurnNo(), readFacts(row.collectedFacts()), Optional.ofNullable(plan),
-                    Optional.ofNullable(read(row.lastToolResult(), ToolResult.class)), turns);
+                    Optional.ofNullable(read(row.lastToolResult(), ToolResult.class)), turns, TaskType.valueOf(row.taskType()));
             return TaskContext.restore(snapshot, row.stateVersion(),
                     mapper.toolCallCount(row.id(), row.currentTurnNo()));
         });
@@ -110,6 +127,7 @@ public class MySqlTaskStateStore implements TaskStateStore {
                 if (updated != 1) {
                     throw new OptimisticLockingFailureException("task has changed; reload before retrying");
                 }
+                context.supersededPlans().forEach(plan -> savePlan(row.id(), plan));
                 snapshot.activePlan().ifPresent(plan -> savePlan(row.id(), plan));
                 if (!snapshot.turns().isEmpty()) {
                     TaskTurn turn = snapshot.turns().get(snapshot.turns().size() - 1);
@@ -123,6 +141,10 @@ public class MySqlTaskStateStore implements TaskStateStore {
                             tool.result() == null ? null : tool.result().errorCode(), tool.durationMs());
                 }
                 long eventNo = mapper.lastEventNo(row.id());
+                for (TaskAction action : context.pendingActions()) {
+                    mapper.insertAction(row.id(), ++eventNo, action.taskStatus().name(), action.action(),
+                            action.reason(), write(action));
+                }
                 for (StateTransition transition : context.pendingTransitions()) {
                     mapper.insertEvent(row.id(), ++eventNo, transition.from().name(),
                             transition.to().name(), "STATE_CHANGED");

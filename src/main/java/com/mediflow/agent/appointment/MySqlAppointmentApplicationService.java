@@ -1,10 +1,13 @@
 package com.mediflow.agent.appointment;
 
+import java.util.Optional;
+
 import com.mediflow.agent.agent.AppointmentApplicationService;
 import com.mediflow.agent.agent.AppointmentExecutionResult;
 import com.mediflow.agent.agent.AppointmentPlan;
 import com.mediflow.agent.agent.AppointmentVerificationResult;
 import com.mediflow.agent.agent.Principal;
+import com.mediflow.agent.agent.PlanId;
 
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
@@ -35,6 +38,22 @@ public final class MySqlAppointmentApplicationService implements AppointmentAppl
                 AppointmentWriteService.BookingCommand.forPlan(
                         new AppointmentWriteService.Actor(principal.userId(), principal.role()),
                         idempotencyKey, plan.id().value(), plan.version()));
+        return executionResult(result);
+    }
+
+    @Override
+    public Optional<AppointmentExecutionResult> findOriginal(PlanId planId, int version,
+                                                              Principal principal, String idempotencyKey) {
+        if (idempotencyKey == null) {
+            return writeService.lookupPlan(principal.userId(), new AppointmentWriteService.PlanClaim(planId.value(), version))
+                    .map(MySqlAppointmentApplicationService::executionResult);
+        }
+        return writeService.lookup(AppointmentWriteService.BookingCommand.forPlan(
+                new AppointmentWriteService.Actor(principal.userId(), principal.role()),
+                idempotencyKey, planId.value(), version)).map(MySqlAppointmentApplicationService::executionResult);
+    }
+
+    private static AppointmentExecutionResult executionResult(AppointmentWriteService.BookingResult result) {
         return switch (result.outcome()) {
             case CREATED -> AppointmentExecutionResult.success(result.appointmentNo());
             case EXISTING -> AppointmentExecutionResult.existing(result.appointmentNo());

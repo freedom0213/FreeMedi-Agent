@@ -20,7 +20,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -53,29 +53,36 @@ public class PortalAppointmentController {
 
     private final AppointmentWriteService writeService;
     private final AppointmentQueryService queryService;
-    private final DemoIdentityService identity;
+    private final MySqlTaskApplicationService tasks;
 
     public PortalAppointmentController(AppointmentWriteService writeService,
-                                       AppointmentQueryService queryService,
-                                       DemoIdentityService identity) {
+                                       AppointmentQueryService queryService, MySqlTaskApplicationService tasks) {
         this.writeService = writeService;
         this.queryService = queryService;
-        this.identity = identity;
+        this.tasks = tasks;
     }
 
     @PostMapping
-    public BookingResponse book(@RequestHeader(value = "X-Demo-User-Id", required = false) String userId,
+    public BookingResponse book(@AuthenticationPrincipal(expression = "patient") Principal principal,
                                 @Valid @RequestBody BookingRequest request) {
-        Principal principal = identity.resolve(userId);
         return BookingResponse.of(writeService.book(AppointmentWriteService.BookingCommand.forSlot(
                 new AppointmentWriteService.Actor(principal.userId(), principal.role()),
                 request.idempotencyKey(), request.slotId())));
     }
 
+    @PostMapping("/status")
+    public BookingResponse checkBooking(@AuthenticationPrincipal(expression = "patient") Principal principal,
+                                       @Valid @RequestBody BookingRequest request) {
+        return writeService.lookup(AppointmentWriteService.BookingCommand.forSlot(
+                new AppointmentWriteService.Actor(principal.userId(), principal.role()),
+                request.idempotencyKey(), request.slotId())).map(BookingResponse::of)
+                .orElseGet(() -> new BookingResponse(false, null, null,
+                        "NOT_FOUND", "暂未查到原请求的结果，可再次核验或重试同一次提交。"));
+    }
+
     @GetMapping("/mine")
-    public List<AppointmentView> mine(@RequestHeader(value = "X-Demo-User-Id", required = false) String userId,
+    public List<AppointmentView> mine(@AuthenticationPrincipal(expression = "patient") Principal principal,
                                       @RequestParam(required = false) Integer limit) {
-        Principal principal = identity.resolve(userId);
         return queryService.listForPatient(principal.userId(),
                 limit == null ? AppointmentQueryService.DEFAULT_LIMIT : limit);
     }
@@ -87,10 +94,20 @@ public class PortalAppointmentController {
     @GetMapping("/{appointmentNo}")
     public ResponseEntity<AppointmentView> detail(
             @PathVariable String appointmentNo,
-            @RequestHeader(value = "X-Demo-User-Id", required = false) String userId) {
-        Principal principal = identity.resolve(userId);
+            @AuthenticationPrincipal(expression = "patient") Principal principal) {
         return queryService.findForPatient(appointmentNo, principal.userId())
                 .map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.notFound().build());
     }
+
+    @PostMapping("/{appointmentNo}/consultation")
+    public ResponseEntity<VisitConsultationResponse> consultation(
+            @PathVariable String appointmentNo,
+            @AuthenticationPrincipal(expression = "patient") Principal principal) {
+        return tasks.openVisitConsultation(principal, appointmentNo)
+                .map(taskId -> ResponseEntity.ok(new VisitConsultationResponse(taskId.value())))
+                .orElseGet(() -> ResponseEntity.notFound().build());
+    }
+
+    public record VisitConsultationResponse(String taskId) { }
 }

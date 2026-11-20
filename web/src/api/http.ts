@@ -1,10 +1,20 @@
 import axios from 'axios'
+import { patientCsrfHeaders, requireLogin } from './auth'
 
-/** The demo identity is resolved server-side from this header, defaulting to the demo patient. */
 export const http = axios.create({
   baseURL: '/api/v1',
   timeout: 120_000,
   headers: { 'Content-Type': 'application/json' },
+})
+
+http.interceptors.request.use(async (config) => {
+  if (config.method === 'post') config.headers.set(await patientCsrfHeaders())
+  return config
+})
+
+http.interceptors.response.use(undefined, (error) => {
+  if (error.response?.status === 401) requireLogin()
+  return Promise.reject(error)
 })
 
 export function errorMessage(error: unknown): string {

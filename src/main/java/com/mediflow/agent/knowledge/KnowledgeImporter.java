@@ -107,14 +107,15 @@ public final class KnowledgeImporter {
                     DocumentOutcome.Action.FAILED, null, 0, invalid.getMessage());
         }
 
-        Optional<KnowledgeDocument> latest = repository.findLatest(parsed.docNo());
-        if (latest.isPresent() && latest.get().contentHash().equals(parsed.contentHash())) {
-            KnowledgeDocument current = latest.get();
-            return new DocumentOutcome(current.docNo(), current.title(),
-                    DocumentOutcome.Action.SKIPPED, current.version(), 0,
-                    "内容未变化，当前状态 " + current.status());
+        Optional<KnowledgeDocument> prior = repository.findByContent(parsed.docNo(), parsed.contentHash());
+        if (prior.isPresent()) {
+            KnowledgeDocument existing = prior.get();
+            return new DocumentOutcome(existing.docNo(), existing.title(),
+                    DocumentOutcome.Action.SKIPPED, existing.version(), 0,
+                    "此版本内容已导入，版本状态 " + existing.status());
         }
 
+        Optional<KnowledgeDocument> latest = repository.findLatest(parsed.docNo());
         int version = latest.map(document -> document.version() + 1).orElse(1);
         Instant publishedAt = clock.instant();
         try {

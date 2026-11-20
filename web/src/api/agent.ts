@@ -1,5 +1,6 @@
-import type { AgentResult, TaskCreated, TaskSnapshot } from '../types/agent'
+import type { AgentResult, ConfirmationIntent, RequirementChanges, TaskCreated, TaskSnapshot } from '../types/agent'
 import { http } from './http'
+import { patientCsrfHeaders, requireLogin } from './auth'
 
 export async function createTask(title: string): Promise<TaskCreated> {
   const { data } = await http.post<TaskCreated>('/tasks', { title })
@@ -18,13 +19,15 @@ export async function streamMessage(
     onDelta: (text: string) => void
     onEvent: (event: { type: string; summary: string }) => void
   },
+  clientRequestId: string = crypto.randomUUID(),
 ): Promise<AgentResult> {
   const response = await fetch(`/api/v1/tasks/${taskId}/messages/stream`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    headers: { 'Content-Type': 'application/json', ...await patientCsrfHeaders() },
+    body: JSON.stringify({ message, clientRequestId }),
   })
   if (!response.ok || !response.body) {
+    if (response.status === 401) requireLogin()
     throw new Error(`stream request failed: ${response.status}`)
   }
   const reader = response.body.getReader()
@@ -67,17 +70,35 @@ export async function confirmAppointment(
   planId: string,
   planVersion: number,
   idempotencyKey: string,
+  retry = false,
 ): Promise<AgentResult> {
   const { data } = await http.post<AgentResult>(`/tasks/${taskId}/confirm`, {
     planId,
     planVersion,
     idempotencyKey,
+    retry,
   })
+  return data
+}
+
+export async function checkAppointmentConfirmation(intent: ConfirmationIntent): Promise<AgentResult> {
+  const { taskId, ...body } = intent
+  const { data } = await http.post<AgentResult>(`/tasks/${taskId}/confirm/status`, body)
   return data
 }
 
 export async function getTask(taskId: string): Promise<TaskSnapshot> {
   const { data } = await http.get<TaskSnapshot>(`/tasks/${taskId}`)
+  return data
+}
+
+export async function updateRequirements(taskId: string, changes: RequirementChanges): Promise<AgentResult> {
+  const { data } = await http.post<AgentResult>(`/tasks/${taskId}/requirements`, changes)
+  return data
+}
+
+export async function selectSlot(taskId: string, batchId: string, slotId: number): Promise<AgentResult> {
+  const { data } = await http.post<AgentResult>(`/tasks/${taskId}/selection`, { batchId, slotId })
   return data
 }
 

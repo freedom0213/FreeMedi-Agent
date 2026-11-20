@@ -28,7 +28,9 @@ server:
 mediflow:
   agent:
     max-steps: ${MEDIFLOW_AGENT_MAX_STEPS:8}
+    model-timeout-ms: ${MEDIFLOW_AGENT_MODEL_TIMEOUT_MS:15000}
     tool-timeout-ms: ${MEDIFLOW_AGENT_TOOL_TIMEOUT_MS:5000}
+    request-timeout-ms: ${MEDIFLOW_AGENT_REQUEST_TIMEOUT_MS:45000}
   llm:
     api-key: ${DEEPSEEK_API_KEY:}
     base-url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com/v1}

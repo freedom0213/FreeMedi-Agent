@@ -4,7 +4,7 @@ import java.util.Set;
 
 public sealed interface AgentDecision
         permits AgentDecision.AskUser, AgentDecision.CallReadTool,
-        AgentDecision.ProposePlan, AgentDecision.Finish {
+        AgentDecision.ProposePlan, AgentDecision.Finish, AgentDecision.Reply {
 
     record AskUser(String question, Set<String> missingFields, TriageRecommendation recommendation) implements AgentDecision {
         public AskUser(String question, Set<String> missingFields) {
@@ -42,6 +42,12 @@ public sealed interface AgentDecision
             if (message == null || message.isBlank()) {
                 throw new IllegalArgumentException("finish message must not be blank");
             }
+        }
+    }
+
+    record Reply(String message) implements AgentDecision {
+        public Reply {
+            if (message == null || message.isBlank()) throw new IllegalArgumentException("reply must not be blank");
         }
     }
 }

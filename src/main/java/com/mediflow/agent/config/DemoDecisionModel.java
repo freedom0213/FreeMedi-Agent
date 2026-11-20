@@ -13,11 +13,13 @@ import java.util.regex.Pattern;
 import com.mediflow.agent.agent.AgentDecision;
 import com.mediflow.agent.agent.DecisionContext;
 import com.mediflow.agent.agent.DecisionModel;
+import com.mediflow.agent.agent.KnowledgeConsultation;
 import com.mediflow.agent.agent.PlanDraft;
 import com.mediflow.agent.agent.ReadToolSpec;
 import com.mediflow.agent.agent.ToolCall;
 import com.mediflow.agent.agent.TriageRecommendation;
 import com.mediflow.agent.appointment.AppointmentDateParser;
+import com.mediflow.agent.knowledge.HospitalKnowledgeQuestion;
 
 /** Small deterministic offline demo; real conversations use DeepSeek, not these keyword rules. */
 public final class DemoDecisionModel implements DecisionModel {
@@ -26,9 +28,14 @@ public final class DemoDecisionModel implements DecisionModel {
             "皮肤科", "皮肤科", "全科医学科", "全科医学科", "全科", "全科医学科",
             "神经内科", "神经内科", "消化内科", "消化内科");
     private static final Pattern DATE = Pattern.compile("\\d{4}-\\d{2}-\\d{2}|(?:\\d{4}年)?\\d{1,2}月\\d{1,2}[日号]?|明天|后天|今天");
+    private static final String DATE_WORD = DATE.pattern() + "|(?:[本这下])?(?:周|星期)[一二三四五六日天]";
+    private static final Pattern PATIENT_DATE = Pattern.compile(DATE_WORD);
+    private static final Pattern DOCTOR = Pattern.compile("[\\p{IsHan}]医生");
+    private static final Pattern DEPARTMENT = Pattern.compile("(?:预约|挂|看|换成|改成)(?!哪|什么)([\\p{IsHan}]{1,7}?科)");
 
     @Override
     public AgentDecision decide(DecisionContext context, List<ReadToolSpec> tools) {
+        if (context.selectionRequired()) return decideWithSelection(context, tools);
         List<String> messages = new ArrayList<>(context.task().turns().stream()
                 .filter(turn -> turn.assistantMessage() != null).map(turn -> turn.userMessage()).toList());
         messages.add(context.userMessage());
@@ -105,6 +112,92 @@ public final class DemoDecisionModel implements DecisionModel {
         return new AgentDecision.ProposePlan(draft,
                 (alternate ? "原日期或时段没有号，为您找到同科室的替代时间。" : "已找到可用号源。")
                         + "请核对下方医生、日期和时间，点击确认预约后才会提交。");
+    }
+
+    private AgentDecision decideWithSelection(DecisionContext context, List<ReadToolSpec> tools) {
+        String message = context.userMessage().strip();
+        if (message.matches(".*(呼吸困难|持续胸痛|意识不清).*")) {
+            return new AgentDecision.Reply("你描述的情况可能需要紧急处理，请立即联系急救或前往急诊。");
+        }
+        if (HospitalKnowledgeQuestion.isConsultation(message)
+                && tools.stream().anyMatch(tool -> KnowledgeConsultation.TOOL_NAME.equals(tool.name()))) {
+            return new AgentDecision.CallReadTool(new ToolCall(KnowledgeConsultation.TOOL_NAME, Map.of("query", message)));
+        }
+        if (message.matches(".*(准备|材料|为什么|理由|规则|怎么去|在哪里|怎么取消).*")
+                && !message.matches(".*(改成|换成|改到|换到|重新查).*")) {
+            return new AgentDecision.Reply("我可以继续帮你核对预约条件。预约方案保持原样；就诊材料和具体要求请以医院通知为准。");
+        }
+        if (message.matches("^(确认|就这个|好的|同意|可以)[。！!，, ]*$")
+                && context.task().status() == com.mediflow.agent.agent.TaskStatus.AWAITING_CONFIRMATION) {
+            return new AgentDecision.Reply("请在确认单上核对医生和时间，再点击「确认预约」。");
+        }
+        Map<String, Object> patch = new LinkedHashMap<>();
+        DEPARTMENTS.keySet().stream().filter(message::contains).max(java.util.Comparator.comparingInt(String::length))
+                .ifPresent(name -> patch.put("departmentName", DEPARTMENTS.get(name)));
+        var department = DEPARTMENT.matcher(message);
+        if (!patch.containsKey("departmentName") && department.find()
+                && !department.group(1).matches(".*(哪|什么|合适).*")) {
+            patch.put("departmentName", department.group(1));
+        }
+        var doctor = DOCTOR.matcher(message);
+        if (doctor.find()) patch.put("doctorName", doctor.group());
+        if (message.matches(".*(医生不限|不限医生|哪个医生都行).*")) patch.put("doctorName", "");
+
+        var date = PATIENT_DATE.matcher(message);
+        if (date.find()) {
+            patch.put("appointmentDate", date.group());
+            patch.put("dateFlexible", prefers(message, date.group(), "(?:别的|其他|其它)(?:日子|日期|天)也"));
+        } else if (message.matches(".*(日期不限|哪天都行).*")
+                || message.matches(".*(最近|尽快|最早).*") && message.matches(".*(预约|挂号|有号|查号).*")) {
+            patch.put("appointmentDate", "");
+        }
+        var period = Pattern.compile("上午|早上|下午|晚上|晚间").matcher(message);
+        if (period.find()) {
+            patch.put("clinicPeriod", period.group());
+            patch.put("periodFlexible", prefers(message, period.group(), "(?:别的|其他|其它)(?:时间|时段)也"));
+        }
+        if (message.matches(".*(时间都可以|时段不限|不限时段).*")) patch.put("clinicPeriod", "");
+        if (message.matches(".*(如果没有号|没号|无号).*替代.*")) {
+            if (patch.containsKey("appointmentDate")) patch.put("dateFlexible", !message.contains("必须"));
+            if (patch.containsKey("clinicPeriod")) patch.put("periodFlexible", !message.contains("必须"));
+        }
+        if (!patch.containsKey("departmentName") && message.matches("^(可以|好的|按你建议|按这个科室).*")
+                && context.task().facts().get("triageRecommendation") instanceof Map<?, ?> recommendation
+                && recommendation.get("departmentName") instanceof String direction) {
+            patch.put("departmentName", direction);
+        }
+        if (!patch.isEmpty() || context.task().facts().containsKey("requirements")
+                && message.matches(".*(查号|查找|找一下|再查|有号吗|看看号源).*")) {
+            return new AgentDecision.CallReadTool(new ToolCall("findAvailableSlots", patch));
+        }
+        String symptom = symptomDirection(message);
+        if (symptom == null && message.matches(".*(分诊|就诊方向).*")) {
+            symptom = context.task().turns().stream().filter(turn -> turn.assistantMessage() != null)
+                    .map(turn -> symptomDirection(turn.userMessage())).filter(java.util.Objects::nonNull)
+                    .reduce((before, last) -> last).orElse(null);
+        }
+        if (symptom != null) {
+            return new AgentDecision.AskUser("可以先考虑" + symptom + "，这是初步就诊方向。需要我按这个方向查号吗？",
+                    Set.of("departmentName"), new TriageRecommendation(0, symptom, "根据你刚才描述的情况给出的就诊方向"));
+        }
+        return new AgentDecision.AskUser("你可以告诉我想看的科室、医生或方便的时间，也可以先描述哪里不舒服。",
+                Set.of("departmentName"));
+    }
+
+    private static String symptomDirection(String message) {
+        if (message.matches("(?s).*(咳嗽|咽痛).*")) return "呼吸内科";
+        if (message.contains("心悸")) return "心内科";
+        if (message.matches("(?s).*(皮疹|瘙痒).*")) return "皮肤科";
+        if (message.matches("(?s).*(头疼|头痛).*")) return "神经内科";
+        if (message.matches("(?s).*(肚子疼|腹痛|胃痛).*")) return "消化内科";
+        return null;
+    }
+
+    private static boolean prefers(String message, String value, String fallback) {
+        String quoted = Pattern.quote(value);
+        return !message.matches(".*(?:必须|只能|只要)(?:在|是|选)?" + quoted + ".*")
+                && message.matches(".*(?:(?:优先|最好)(?:选|是|在)?" + quoted + "|"
+                + quoted + "(?:优先|最好)|" + fallback + ").*");
     }
 
     private static long number(Map<?, ?> values, String name) {
