@@ -75,8 +75,14 @@ public final class KnowledgeRetriever {
             return unavailable("向量索引当前不可用");
         }
         final List<KnowledgeIndexHit> hits;
+        var publishedIds = repository.findPublishedDocumentIds();
+        if (publishedIds.isEmpty()) {
+            return new RetrievalResult(true, 0, embedder.name(), null, List.of());
+        }
         try {
-            hits = index.search(embedder.embed(query.trim()), filter, topK * OVER_FETCH_FACTOR);
+            var criteria = filter == null ? KnowledgeIndexFilter.none() : filter;
+            hits = index.search(embedder.embed(query.trim()), criteria.restrictToPublished(publishedIds),
+                    topK * OVER_FETCH_FACTOR);
         } catch (RuntimeException failure) {
             logger.warn("Knowledge retrieval could not query the index: type={}", failure.getClass().getSimpleName());
             return unavailable("向量索引查询失败");

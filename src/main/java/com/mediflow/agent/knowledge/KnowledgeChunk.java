@@ -12,4 +12,8 @@ public record KnowledgeChunk(long id, long documentId, int version, int chunkNo,
 
     /** Indexing state of a chunk. A failed chunk can be retried without rebuilding its neighbours. */
     public enum EmbeddingStatus { PENDING, INDEXED, FAILED }
+
+    public static boolean retrievable(KnowledgeStatus status, EmbeddingStatus embeddingStatus) {
+        return status == KnowledgeStatus.PUBLISHED && embeddingStatus == EmbeddingStatus.INDEXED;
+    }
 }

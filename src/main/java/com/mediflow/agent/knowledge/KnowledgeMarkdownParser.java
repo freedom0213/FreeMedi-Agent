@@ -40,6 +40,10 @@ public final class KnowledgeMarkdownParser {
     }
 
     ParsedDocument parse(String raw, String origin) {
+        if (raw.startsWith("\uFEFF")) raw = raw.substring(1);
+        if (raw.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException(origin + " 包含无效的空字符，请另存为 UTF-8 文本");
+        }
         List<String> lines = List.of(raw.replace("\r\n", "\n").replace('\r', '\n').split("\n", -1));
         if (lines.isEmpty() || !FENCE.equals(lines.get(0).strip())) {
             throw new IllegalArgumentException(origin + " 必须以 " + FENCE + " 开头写入元信息");
@@ -58,7 +62,7 @@ public final class KnowledgeMarkdownParser {
             int separator = line.indexOf(':');
             if (separator <= 0) {
                 throw new IllegalArgumentException(origin + " 第 " + (index + 1)
-                        + " 行的元信息不是 key: value 形式：" + line);
+                        + " 行的元信息不是 key: value 形式");
             }
             String key = line.substring(0, separator).strip();
             String value = line.substring(separator + 1).strip();
@@ -66,7 +70,9 @@ public final class KnowledgeMarkdownParser {
                 throw new IllegalArgumentException(origin + " 出现了无法识别的元信息键：" + key
                         + "，可用 " + REQUIRED + " 与 " + OPTIONAL);
             }
-            front.put(key, value);
+            if (front.putIfAbsent(key, value) != null) {
+                throw new IllegalArgumentException(origin + " 重复填写了元信息：" + key);
+            }
         }
         if (closing < 0) {
             throw new IllegalArgumentException(origin + " 的元信息没有用 " + FENCE + " 结束");
@@ -99,12 +105,20 @@ public final class KnowledgeMarkdownParser {
             throw new IllegalArgumentException(origin + " 是科室资料，必须给出 department_id");
         }
 
-        String docNo = front.get("doc_no");
-        String title = front.get("title");
-        String source = front.get("source");
+        String docNo = limitedField(front, "doc_no", 64, origin);
+        String title = limitedField(front, "title", 200, origin);
+        String source = limitedField(front, "source", 200, origin);
         String hash = sha256(String.join("\n", List.of(docNo, title, type.name(),
                 String.valueOf(departmentId), String.valueOf(doctorId), source, body)));
         return new ParsedDocument(docNo, title, type, departmentId, doctorId, source, body, hash);
+    }
+
+    private static String limitedField(Map<String, String> front, String key, int limit, String origin) {
+        String value = front.get(key);
+        if (value.codePointCount(0, value.length()) > limit) {
+            throw new IllegalArgumentException(origin + " 的 " + key + " 最多 " + limit + " 个字符");
+        }
+        return value;
     }
 
     private static Long optionalId(Map<String, String> front, String key, String origin) {
@@ -119,7 +133,7 @@ public final class KnowledgeMarkdownParser {
             }
             return id;
         } catch (NumberFormatException exception) {
-            throw new IllegalArgumentException(origin + " 的 " + key + " 必须是正整数：" + value);
+            throw new IllegalArgumentException(origin + " 的 " + key + " 必须是正整数");
         }
     }
 

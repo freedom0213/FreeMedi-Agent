@@ -50,6 +50,9 @@ public final class KnowledgeImporter {
         }
     }
 
+    public record ImportPreview(KnowledgeMarkdownParser.ParsedDocument document, List<KnowledgeChunker.Piece> chunks,
+                                KnowledgeDocument latest, KnowledgeDocument published, KnowledgeDocument duplicate) {}
+
     private final KnowledgeRepository repository;
     private final KnowledgeMarkdownParser parser;
     private final KnowledgeChunker chunker;
@@ -80,6 +83,21 @@ public final class KnowledgeImporter {
         logger.info("Knowledge import finished from {}: files={} imported={} skipped={} failed={}",
                 sourceDirectory, files.size(), summary.imported(), summary.skipped(), summary.failed());
         return summary;
+    }
+
+    public ImportPreview preview(String markdown) {
+        var parsed = parser.parse(markdown, "Markdown 文件");
+        var chunks = chunksForImport(parsed);
+        repository.checkDocumentReferences(parsed.departmentId(), parsed.doctorId());
+        var versions = repository.listVersions(parsed.docNo());
+        KnowledgeDocument latest = versions.isEmpty() ? null : versions.get(versions.size() - 1);
+        KnowledgeDocument published = null;
+        KnowledgeDocument duplicate = null;
+        for (var version : versions) {
+            if (version.isPublished()) published = version;
+            if (version.contentHash().equals(parsed.contentHash())) duplicate = version;
+        }
+        return new ImportPreview(parsed, chunks, latest, published, duplicate);
     }
 
     private List<Path> markdownFiles(Path sourceDirectory) {
@@ -119,13 +137,14 @@ public final class KnowledgeImporter {
         int version = latest.map(document -> document.version() + 1).orElse(1);
         Instant publishedAt = clock.instant();
         try {
+            var pieces = chunksForImport(parsed);
             int chunks = transactions.execute(status -> {
                 if (latest.isPresent()) {
                     repository.archiveAllVersions(parsed.docNo());
                 }
                 long documentId = repository.insertDocument(parsed, version,
                         KnowledgeStatus.PUBLISHED, publishedAt);
-                return repository.insertChunks(documentId, version, chunker.chunk(parsed.body()));
+                return repository.insertChunks(documentId, version, pieces);
             });
             return new DocumentOutcome(parsed.docNo(), parsed.title(),
                     DocumentOutcome.Action.IMPORTED, version, chunks, "已发布");
@@ -134,5 +153,11 @@ public final class KnowledgeImporter {
             return new DocumentOutcome(parsed.docNo(), parsed.title(),
                     DocumentOutcome.Action.FAILED, version, 0, failure.getMessage());
         }
+    }
+
+    private List<KnowledgeChunker.Piece> chunksForImport(KnowledgeMarkdownParser.ParsedDocument parsed) {
+        var pieces = chunker.chunk(parsed.body());
+        if (pieces.isEmpty()) throw new IllegalArgumentException("Markdown 正文没有可切分的片段，请为章节添加正文");
+        return pieces;
     }
 }

@@ -69,11 +69,7 @@ public final class KnowledgeIndexer {
         int failed = 0;
         for (KnowledgeRepository.PendingChunk chunk : pending) {
             try {
-                index.upsert(java.util.List.of(new KnowledgeIndexPoint(
-                        chunk.chunkId(), chunk.documentId(), chunk.version(), chunk.docType(),
-                        chunk.departmentId(), chunk.doctorId(), KnowledgeStatus.PUBLISHED,
-                        embedder.name(), embedder.embed(textToEmbed(chunk.heading(), chunk.content())))));
-                repository.markIndexed(java.util.List.of(chunk.chunkId()), clock.instant());
+                indexChunk(chunk);
                 indexed++;
             } catch (RuntimeException failure) {
                 repository.markIndexFailed(chunk.chunkId(), failure.getMessage());
@@ -89,6 +85,15 @@ public final class KnowledgeIndexer {
                 summary.indexed(), summary.failed(), summary.stillPending(), summary.indexSize(),
                 summary.model());
         return summary;
+    }
+
+    void indexChunk(KnowledgeRepository.PendingChunk chunk) {
+        // The Qdrant payload marks a ready point. MySQL's version allowlist controls patient visibility.
+        index.upsert(java.util.List.of(new KnowledgeIndexPoint(
+                chunk.chunkId(), chunk.documentId(), chunk.version(), chunk.docType(),
+                chunk.departmentId(), chunk.doctorId(), KnowledgeStatus.PUBLISHED,
+                embedder.name(), embedder.embed(textToEmbed(chunk.heading(), chunk.content())))));
+        repository.markIndexed(java.util.List.of(chunk.chunkId()), clock.instant());
     }
 
     /**
@@ -109,14 +114,16 @@ public final class KnowledgeIndexer {
     }
 
     public IndexSummary rebuild(int batchLimit) {
-        if (!index.available()) {
-            throw new IllegalStateException("索引当前不可用，无法重建；请先确认向量库是否在运行");
-        }
-        index.clear();
-        int reset = repository.resetPublishedChunksToPending();
-        logger.info("Knowledge index cleared for rebuild: chunksResetToPending={} model={}", reset,
-                embedder.name());
-        return indexPending(batchLimit);
+        return repository.withIndexMaintenanceLock(() -> {
+            if (!index.available()) {
+                throw new IllegalStateException("索引当前不可用，无法重建；请先确认向量库是否在运行");
+            }
+            index.clear();
+            int reset = repository.resetPublishedChunksToPending();
+            logger.info("Knowledge index cleared for rebuild: chunksResetToPending={} model={}", reset,
+                    embedder.name());
+            return indexPending(batchLimit);
+        });
     }
 
     /**

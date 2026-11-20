@@ -55,10 +55,12 @@ class DeepSeekDecisionModelTest {
         var expected = Map.of(401, "MODEL_AUTH_REJECTED", 402, "MODEL_QUOTA_REJECTED",
                 503, "MODEL_TRANSIENT", 400, "MODEL_PROVIDER_REJECTED");
         expected.forEach((status, reason) -> {
-            when(chatModel.generate(anyList(), anyList()))
-                    .thenThrow(new dev.ai4j.openai4j.OpenAiHttpException(status, "private provider body"));
-            assertThatThrownBy(() -> model.decide(context("预约咨询"), tools)).hasMessage(reason);
-            org.mockito.Mockito.reset(chatModel);
+            var provider = new dev.ai4j.openai4j.OpenAiHttpException(status, "private provider body");
+            for (var failure : List.of(provider, new RuntimeException(provider))) {
+                when(chatModel.generate(anyList(), anyList())).thenThrow(failure);
+                assertThatThrownBy(() -> model.decide(context("预约咨询"), tools)).hasMessage(reason);
+                org.mockito.Mockito.reset(chatModel);
+            }
         });
     }
 

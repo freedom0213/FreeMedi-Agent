@@ -4,11 +4,13 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 import javax.sql.DataSource;
 
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.stereotype.Service;
 
 /**
@@ -25,6 +27,8 @@ import org.springframework.stereotype.Service;
 @Service
 @Profile("mysql")
 public final class KnowledgeRepository {
+
+    private static final String INDEX_LOCK_NAME = "SHA2(CONCAT(DATABASE(), ':mediflow-knowledge-index'), 256)";
 
     private static final String DOCUMENT_COLUMNS = """
             SELECT id, doc_no, title, doc_type, department_id, doctor_id, source, version, status,
@@ -57,6 +61,83 @@ public final class KnowledgeRepository {
     public List<KnowledgeDocument> listAll() {
         return jdbc.query(DOCUMENT_COLUMNS + " ORDER BY doc_no, version", KnowledgeRepository::mapDocument);
     }
+
+    public List<KnowledgeDocument> listVersions(String docNo) {
+        return jdbc.query(DOCUMENT_COLUMNS + " WHERE doc_no = ? ORDER BY version",
+                KnowledgeRepository::mapDocument, docNo);
+    }
+
+    public List<Long> findPublishedDocumentIds() {
+        return jdbc.queryForList("SELECT id FROM knowledge_document WHERE status = 'PUBLISHED'", Long.class);
+    }
+
+    /** Coordinates collection verification and destructive rebuilds, including the separate CLI process. */
+    <T> T withIndexMaintenanceLock(Supplier<T> operation) {
+        return jdbc.execute((ConnectionCallback<T>) connection -> {
+            try (var statement = connection.createStatement()) {
+                try (var result = statement.executeQuery("SELECT GET_LOCK(" + INDEX_LOCK_NAME + ", 0)")) {
+                    if (!result.next() || result.getInt(1) != 1) throw new IndexMaintenanceBusy();
+                }
+                try {
+                    return operation.get();
+                } finally {
+                    statement.execute("SELECT RELEASE_LOCK(" + INDEX_LOCK_NAME + ")");
+                }
+            }
+        });
+    }
+
+    static final class IndexMaintenanceBusy extends IllegalStateException {
+        IndexMaintenanceBusy() {
+            super("资料索引正在发布或重建，请稍后再试。");
+        }
+    }
+
+    public void checkDocumentReferences(Long departmentId, Long doctorId) {
+        if (departmentId != null && !Boolean.TRUE.equals(jdbc.queryForObject(
+                "SELECT EXISTS (SELECT 1 FROM department WHERE id = ?)", Boolean.class, departmentId))) {
+            throw new IllegalArgumentException("department_id 对应的科室不存在，请核对编号");
+        }
+        if (doctorId != null && !Boolean.TRUE.equals(jdbc.queryForObject(
+                "SELECT EXISTS (SELECT 1 FROM doctor WHERE id = ?)", Boolean.class, doctorId))) {
+            throw new IllegalArgumentException("doctor_id 对应的医生不存在，请核对编号");
+        }
+    }
+
+    /** Locks the same document-number range that an import updates. Requires a transaction. */
+    public List<KnowledgeDocument> lockVersions(String docNo) {
+        return jdbc.query(DOCUMENT_COLUMNS + " WHERE doc_no = ? ORDER BY version FOR UPDATE",
+                KnowledgeRepository::mapDocument, docNo);
+    }
+
+    public void archivePublishedVersion(long documentId) {
+        jdbc.update("UPDATE knowledge_document SET status = 'ARCHIVED' WHERE id = ? AND status = 'PUBLISHED'",
+                documentId);
+    }
+
+    public void publishDraft(KnowledgeDocument draft, Instant publishedAt) {
+        jdbc.update("""
+                UPDATE knowledge_document SET status = 'ARCHIVED'
+                WHERE doc_no = ? AND id <> ? AND status <> 'ARCHIVED'
+                """, draft.docNo(), draft.id());
+        jdbc.update("""
+                UPDATE knowledge_document SET status = 'PUBLISHED', published_at = ?
+                WHERE id = ? AND status = 'DRAFT'
+                """, Timestamp.from(publishedAt), draft.id());
+    }
+
+    public List<ChunkCount> countChunksByDocument() {
+        return jdbc.query("""
+                SELECT c.document_id, c.embedding_status, COUNT(*) AS chunk_count
+                FROM knowledge_chunk c
+                JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+                GROUP BY c.document_id, c.embedding_status
+                """, (row, index) -> new ChunkCount(row.getLong("document_id"),
+                KnowledgeChunk.EmbeddingStatus.valueOf(row.getString("embedding_status")),
+                row.getInt("chunk_count")));
+    }
+
+    public record ChunkCount(long documentId, KnowledgeChunk.EmbeddingStatus status, int count) {}
 
     public List<KnowledgeDocument> listByStatus(KnowledgeStatus status) {
         return jdbc.query(DOCUMENT_COLUMNS + " WHERE status = ? ORDER BY doc_no, version",
@@ -136,7 +217,7 @@ public final class KnowledgeRepository {
                             Long departmentId, Long doctorId,
                             KnowledgeChunk.EmbeddingStatus embeddingStatus) {
         public boolean retrievable() {
-            return status == KnowledgeStatus.PUBLISHED;
+            return KnowledgeChunk.retrievable(status, embeddingStatus);
         }
     }
 
@@ -160,12 +241,56 @@ public final class KnowledgeRepository {
                 WHERE c.embedding_status <> 'INDEXED' AND d.status = 'PUBLISHED'
                 ORDER BY c.id
                 LIMIT ?
-                """, (result, rowNum) -> new PendingChunk(
-                result.getLong("id"), result.getLong("document_id"), result.getInt("version"),
-                result.getString("heading"), result.getString("content"),
-                KnowledgeDocType.from(result.getString("doc_type")),
-                result.getObject("department_id", Long.class),
-                result.getObject("doctor_id", Long.class)), limit);
+                """, KnowledgeRepository::mapPendingChunk, limit);
+    }
+
+    public Optional<PendingChunk> nextDraftChunk(long documentId, int version) {
+        return jdbc.query("""
+                SELECT c.id, c.document_id, c.version, c.heading, c.content,
+                       d.doc_type, d.department_id, d.doctor_id
+                FROM knowledge_chunk c
+                JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+                WHERE d.id = ? AND d.version = ? AND d.status = 'DRAFT' AND c.embedding_status <> 'INDEXED'
+                ORDER BY c.chunk_no LIMIT 1
+                """, KnowledgeRepository::mapPendingChunk, documentId, version).stream().findFirst();
+    }
+
+    public List<Long> indexedChunkIds(long documentId, int version) {
+        return jdbc.queryForList("""
+                SELECT id FROM knowledge_chunk
+                WHERE document_id = ? AND version = ? AND embedding_status = 'INDEXED'
+                ORDER BY chunk_no
+                """, Long.class, documentId, version);
+    }
+
+    public int countVersionChunks(long documentId, int version) {
+        return jdbc.queryForObject("""
+                SELECT COUNT(*) FROM knowledge_chunk WHERE document_id = ? AND version = ?
+                """, Integer.class, documentId, version);
+    }
+
+    public void resetMissingDraftChunks(long documentId, List<Long> ids) {
+        if (ids.isEmpty()) return;
+        var args = new java.util.ArrayList<Object>();
+        args.add(documentId);
+        args.addAll(ids);
+        var placeholders = String.join(",", java.util.Collections.nCopies(ids.size(), "?"));
+        jdbc.update("""
+                UPDATE knowledge_chunk c
+                JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+                SET c.embedding_status = 'PENDING', c.index_error = NULL, c.indexed_at = NULL
+                WHERE d.id = ? AND d.status = 'DRAFT' AND c.id IN (%s)
+                """.formatted(placeholders), args.toArray());
+    }
+
+    public void markDraftIndexFailed(long chunkId, String error) {
+        String message = error == null ? "unknown" : error;
+        jdbc.update("""
+                UPDATE knowledge_chunk c
+                JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+                SET c.embedding_status = 'FAILED', c.index_error = ?
+                WHERE c.id = ? AND d.status = 'DRAFT' AND c.embedding_status <> 'INDEXED'
+                """, message.length() <= 500 ? message : message.substring(0, 500), chunkId);
     }
 
     /**
@@ -258,6 +383,13 @@ public final class KnowledgeRepository {
 
     private static Instant toInstant(Timestamp timestamp) {
         return timestamp == null ? null : timestamp.toInstant();
+    }
+
+    private static PendingChunk mapPendingChunk(java.sql.ResultSet result, int rowNum) throws java.sql.SQLException {
+        return new PendingChunk(result.getLong("id"), result.getLong("document_id"), result.getInt("version"),
+                result.getString("heading"), result.getString("content"),
+                KnowledgeDocType.from(result.getString("doc_type")), result.getObject("department_id", Long.class),
+                result.getObject("doctor_id", Long.class));
     }
 
     private static KnowledgeDocument mapDocument(java.sql.ResultSet result, int rowNum)

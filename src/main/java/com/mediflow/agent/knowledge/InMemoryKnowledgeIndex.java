@@ -4,6 +4,8 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -45,6 +47,15 @@ public final class InMemoryKnowledgeIndex implements KnowledgeIndex {
     }
 
     @Override
+    public Set<Long> readyChunkIds(List<Long> ids) {
+        if (!available) throw new IllegalStateException("知识库索引当前不可用");
+        return ids.stream().filter(id -> {
+            var point = points.get(id);
+            return point != null && point.status() == KnowledgeStatus.PUBLISHED;
+        }).collect(Collectors.toSet());
+    }
+
+    @Override
     public void removeVersion(long documentId, int version) {
         points.values().removeIf(point -> point.documentId() == documentId && point.version() == version);
     }
@@ -81,6 +92,9 @@ public final class InMemoryKnowledgeIndex implements KnowledgeIndex {
         }
         if (filter == null) {
             return true;
+        }
+        if (filter.publishedDocumentIds() != null && !filter.publishedDocumentIds().contains(point.documentId())) {
+            return false;
         }
         if (filter.docType() != null && filter.docType() != point.docType()) {
             return false;

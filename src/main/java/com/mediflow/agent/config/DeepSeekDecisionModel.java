@@ -123,7 +123,13 @@ public final class DeepSeekDecisionModel implements DecisionModel {
             try {
                 response = requiredTool == null ? model.generate(messages, toolSpecifications)
                         : model.generate(messages, requiredTool);
-            } catch (OpenAiHttpException error) {
+            } catch (RuntimeException failure) {
+                Throwable cause = failure;
+                // LangChain4j can wrap the HTTP error even with its own retries disabled.
+                while (cause != null && !(cause instanceof OpenAiHttpException) && cause.getCause() != cause) {
+                    cause = cause.getCause();
+                }
+                if (!(cause instanceof OpenAiHttpException error)) throw failure;
                 throw new ModelDecisionException(switch (error.code()) {
                     case 401, 403 -> MODEL_AUTH_REJECTED;
                     case 402 -> MODEL_QUOTA_REJECTED;

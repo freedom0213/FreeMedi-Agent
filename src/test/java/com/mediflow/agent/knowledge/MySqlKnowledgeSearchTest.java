@@ -100,6 +100,10 @@ class MySqlKnowledgeSearchTest {
         // The excerpt is read back from MySQL, so what a patient would be shown is the stored text.
         assertThat(top.content()).isEqualTo(repository.findChunkViews(List.of(top.chunkId()))
                 .get(0).content());
+
+        // A stale vector can remain after an index failure. The database state still blocks it.
+        repository.markIndexFailed(top.chunkId(), "fixture failure after the vector was written");
+        assertThat(retriever.search("预约之后还能取消吗", KnowledgeIndexFilter.none(), 5).found()).isFalse();
     }
 
     @Test
@@ -264,6 +268,11 @@ class MySqlKnowledgeSearchTest {
                     throw new IllegalStateException("拒绝写入：" + point.chunkId());
                 }
             }
+        }
+
+        @Override
+        public java.util.Set<Long> readyChunkIds(List<Long> ids) {
+            return java.util.Set.of();
         }
 
         @Override

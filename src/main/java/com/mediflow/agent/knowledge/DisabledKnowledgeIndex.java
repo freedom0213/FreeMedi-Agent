@@ -1,6 +1,7 @@
 package com.mediflow.agent.knowledge;
 
 import java.util.List;
+import java.util.Set;
 
 /**
  * The index used when no vector store is configured.
@@ -32,6 +33,11 @@ public final class DisabledKnowledgeIndex implements KnowledgeIndex {
     @Override
     public void upsert(List<KnowledgeIndexPoint> points) {
         throw new IllegalStateException(reason + "，无法写入向量");
+    }
+
+    @Override
+    public Set<Long> readyChunkIds(List<Long> ids) {
+        throw new IllegalStateException(reason + "，无法核验向量");
     }
 
     @Override

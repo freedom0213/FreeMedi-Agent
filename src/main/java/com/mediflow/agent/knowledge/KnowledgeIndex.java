@@ -1,6 +1,7 @@
 package com.mediflow.agent.knowledge;
 
 import java.util.List;
+import java.util.Set;
 
 /**
  * The searchable index of knowledge chunks.
@@ -31,11 +32,14 @@ public interface KnowledgeIndex {
      */
     void upsert(List<KnowledgeIndexPoint> points);
 
+    /** IDs whose points are present and ready in this index, before MySQL publication is applied. */
+    Set<Long> readyChunkIds(List<Long> ids);
+
     /** Drops every point of one document version, used when a version is superseded or withdrawn. */
     void removeVersion(long documentId, int version);
 
     /**
-     * Nearest points first. {@code filter} narrows by metadata; status is always restricted to published.
+     * Nearest ready points first. Patient callers supply the MySQL publication allowlist in the filter.
      *
      * <p>Up to {@code topK} candidates come back even when none of them is related to the query, at a
      * score near zero: a vector store ranks, it does not judge. A non-empty result therefore says

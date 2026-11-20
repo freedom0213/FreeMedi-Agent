@@ -16,6 +16,10 @@ const authHttp = axios.create({ baseURL: '/api/v1/auth', timeout: 10_000 })
 const sessionChanges = new BroadcastChannel('freemedi-patient-session')
 sessionChanges.onmessage = () => window.location.reload()
 
+export function announceSessionChange() {
+  sessionChanges.postMessage('changed')
+}
+
 export const patientSession = shallowRef<PatientSession | null>(null)
 
 const patientPaths = new Set(['/guide', '/booking', '/appointments'])
@@ -55,7 +59,7 @@ export async function login(username: string, password: string, next: string) {
   await authHttp.post('/login', new URLSearchParams({ username, password }), {
     headers: { [data.headerName]: data.token },
   })
-  sessionChanges.postMessage('changed')
+  announceSessionChange()
   window.location.replace(next)
 }
 
@@ -71,6 +75,6 @@ export async function patientCsrfHeaders(): Promise<Record<string, string>> {
 
 export async function logout() {
   await authHttp.post('/logout', undefined, { headers: await patientCsrfHeaders() })
-  sessionChanges.postMessage('changed')
+  announceSessionChange()
   window.location.replace('/login')
 }

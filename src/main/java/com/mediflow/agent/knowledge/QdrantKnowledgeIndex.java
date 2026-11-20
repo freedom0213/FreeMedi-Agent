@@ -8,9 +8,11 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.Set;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -198,6 +200,29 @@ public final class QdrantKnowledgeIndex implements KnowledgeIndex {
     }
 
     @Override
+    public Set<Long> readyChunkIds(List<Long> ids) {
+        var ready = new HashSet<Long>();
+        for (int start = 0; start < ids.size(); start += UPSERT_BATCH_SIZE) {
+            ObjectNode body = json.createObjectNode();
+            ArrayNode requested = body.putArray("ids");
+            ids.subList(start, Math.min(ids.size(), start + UPSERT_BATCH_SIZE)).forEach(requested::add);
+            body.put("with_payload", true);
+            body.put("with_vector", false);
+            JsonNode response = execute(request("/collections/" + collection + "/points")
+                    .POST(jsonBody(body)).build(), true);
+            if (response == null) return Set.of();
+            for (JsonNode point : response.path("result")) {
+                JsonNode payload = point.path("payload");
+                if (KnowledgeStatus.PUBLISHED.name().equals(payload.path(KEY_STATUS).asText())
+                        && model.equals(payload.path(KEY_MODEL).asText())) {
+                    ready.add(point.path("id").asLong());
+                }
+            }
+        }
+        return ready;
+    }
+
+    @Override
     public void removeVersion(long documentId, int version) {
         // No model condition on purpose: a version that is no longer published should leave the index
         // whatever model produced it, otherwise stale vectors from a previous model could never be
@@ -220,6 +245,9 @@ public final class QdrantKnowledgeIndex implements KnowledgeIndex {
         if (queryVector.length != dimensions) {
             throw new IllegalStateException("查询向量是 " + queryVector.length + " 维，而集合 " + collection
                     + " 是 " + dimensions + " 维；当前 embedding 模型与索引不匹配，请重建索引");
+        }
+        if (filter != null && filter.publishedDocumentIds() != null && filter.publishedDocumentIds().isEmpty()) {
+            return List.of();
         }
         ObjectNode body = json.createObjectNode();
         ArrayNode vector = body.putArray("vector");
@@ -299,7 +327,7 @@ public final class QdrantKnowledgeIndex implements KnowledgeIndex {
     }
 
     /**
-     * Builds the metadata filter. Publication is always required; a department or doctor restriction
+     * Builds the metadata filter. The physical point must be ready; a department or doctor restriction
      * additionally keeps material that declares no subject at all.
      */
     private ObjectNode buildFilter(KnowledgeIndexFilter filter) {
@@ -307,6 +335,12 @@ public final class QdrantKnowledgeIndex implements KnowledgeIndex {
         ArrayNode must = root.putArray("must");
         must.add(keyMatch(KEY_STATUS, KnowledgeStatus.PUBLISHED.name()));
         if (filter != null) {
+            if (filter.publishedDocumentIds() != null) {
+                var documentCondition = must.addObject();
+                documentCondition.put("key", KEY_DOCUMENT_ID);
+                var ids = documentCondition.putObject("match").putArray("any");
+                filter.publishedDocumentIds().forEach(ids::add);
+            }
             if (filter.docType() != null) {
                 must.add(keyMatch(KEY_DOC_TYPE, filter.docType().name()));
             }

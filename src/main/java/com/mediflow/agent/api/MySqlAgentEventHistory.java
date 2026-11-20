@@ -1,9 +1,12 @@
 package com.mediflow.agent.api;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 
 import javax.sql.DataSource;
 
@@ -16,6 +19,7 @@ import com.mediflow.agent.agent.TaskAction;
 
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
+
 import org.springframework.stereotype.Service;
 
 @Service
@@ -70,11 +74,44 @@ public class MySqlAgentEventHistory {
                 JOIN agent_task t ON t.id = e.task_id
                 WHERE t.task_no = ? AND t.patient_id = ?
                 ORDER BY e.event_no
-                """, (result, rowNum) -> new TraceEntry(result.getLong("event_no"),
-                result.getTimestamp("created_at").toInstant(), result.getString("event_type"),
-                result.getString("from_status"), result.getString("to_status"), result.getString("reason_code"),
-                readAction(result.getString("metadata"))), taskId.value(), principal.userId());
+                """, this::traceEntry, taskId.value(), principal.userId());
         return new TaskTrace(taskId.value(), entries);
+    }
+
+    List<TaskSummary> recentTaskSummaries(int limit) {
+        return jdbc.query("""
+                SELECT task_no, task_type, status, current_turn_no, updated_at
+                FROM agent_task ORDER BY updated_at DESC, id DESC LIMIT ?
+                """, MySqlAgentEventHistory::taskSummary, limit);
+    }
+
+    Optional<TaskSummary> taskSummary(String taskId) {
+        return jdbc.query("""
+                SELECT task_no, task_type, status, current_turn_no, updated_at
+                FROM agent_task WHERE task_no = ?
+                """, MySqlAgentEventHistory::taskSummary, taskId).stream().findFirst();
+    }
+
+    List<TraceEntry> adminTraceActions(String taskId, long after, int limit) {
+        return jdbc.query("""
+                SELECT e.event_no, e.event_type, e.from_status, e.to_status, e.reason_code, e.metadata, e.created_at
+                FROM agent_state_event e
+                JOIN agent_task t ON t.id = e.task_id
+                WHERE t.task_no = ? AND e.event_no > ? AND e.metadata IS NOT NULL
+                ORDER BY e.event_no LIMIT ?
+                """, this::traceEntry, taskId, after, limit);
+    }
+
+    private TraceEntry traceEntry(ResultSet result, int rowNum) throws SQLException {
+        return new TraceEntry(result.getLong("event_no"), result.getTimestamp("created_at").toInstant(),
+                result.getString("event_type"), result.getString("from_status"), result.getString("to_status"),
+                result.getString("reason_code"), readAction(result.getString("metadata")));
+    }
+
+    private static TaskSummary taskSummary(ResultSet result, int rowNum) throws SQLException {
+        return new TaskSummary(result.getString("task_no"), result.getString("task_type"),
+                result.getString("status"), result.getInt("current_turn_no"),
+                result.getTimestamp("updated_at").toInstant());
     }
 
     private TaskAction readAction(String value) {
@@ -87,6 +124,8 @@ public class MySqlAgentEventHistory {
     }
 
     public record TaskTrace(String taskId, List<TraceEntry> entries) { }
+
+    public record TaskSummary(String taskId, String taskType, String status, int turnCount, Instant updatedAt) { }
 
     public record TraceEntry(long sequence, Instant recordedAt, String type, String fromStatus,
                              String toStatus, String reason, TaskAction action) { }
