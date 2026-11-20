@@ -1,325 +1,137 @@
-# MediFlow Agent 核心架构设计 v1
+# FreeMedi-Agent Agent Runtime 架构与实现
 
-> 当前阶段：Agent 运行时设计与数据库逻辑模型设计，不包含建表脚本。
->
-> 目标：明确 Agent 如何运行、哪些决策交给模型、哪些行为由后端强制控制，以及后续代码应该从哪里开始。
+> 核对日期：2026-11-17，依据当前工作区源码静态核对；本轮未启动服务或重跑测试。
+> 本文维护已实现的运行边界和约束。用户已确认首版范围与完成标准，统一见[首版交付计划](../product/delivery-roadmap-v1.md)；具体接口、状态和数据模型变更仍须实施前评审，本轮不修改实现。
 
-## 1. 设计结论
+## 1. 当前架构
 
-MediFlow 采用**单 Agent、受限工具调用、显式任务状态、人工确认门禁**的架构。
-
-模型可以根据用户目标和工具结果选择下一步，但模型不能直接访问数据库、修改任务状态或执行预约写操作。所有业务写入都经过后端确认命令和业务服务。
-
-核心运行过程：
+系统采用单 Agent、受限只读工具循环、显式任务状态和独立预约确认命令。Java 后端控制状态、数据归属和业务写入，LangChain4j 负责模型调用封装。
 
 ```text
-用户消息
-  ↓
-AgentRuntime 加载任务上下文
-  ↓
-模型返回一个结构化决策
-  ├─ ASK_USER       → 询问用户并暂停
-  ├─ CALL_READ_TOOL → 后端校验并执行只读工具，再继续循环
-  ├─ PROPOSE_PLAN   → 保存候选方案并等待确认
-  └─ FINISH         → 结束任务
+患者消息
+  → 加载任务、校验归属、开启本轮
+  → 模型决策
+      ASK_USER       → 保存问题、等待用户
+      CALL_READ_TOOL → 执行只读工具。查号后保存候选等待选择，其他工具继续决策
+      PROPOSE_PLAN   → 保存有版本的预约方案、等待确认
+      FINISH         → 结束本次任务
 
-用户确认命令
-  ↓
-后端校验方案版本、身份、号源和幂等键
-  ↓
-预约应用服务执行写入
-  ↓
-重新查询核验
-  ↓
-完成或失败
+具体方案的确认命令
+  → 校验任务归属、方案标识/版本/期限
+  → 保存执行状态
+  → 共用预约写服务在事务内校验并占号、写预约和审计
+  → 提交后查询核验
+  → 保存完成或失败状态
 ```
 
-## 2. 三种架构方案
+源码入口：[AgentRuntimeService](../../src/main/java/com/mediflow/agent/agent/AgentRuntimeService.java)、[TaskContext](../../src/main/java/com/mediflow/agent/agent/TaskContext.java)。数据库职责见[持久化说明](persistence-v1.md)。
 
-### 方案 A：固定工作流
+## 2. 必须保留的边界
 
-流程由代码写死：收集日期 → 查科室 → 查医生 → 查号源 → 确认 → 预约。
+以下是从原产品方案保留、与现有实现相符的约束，不因归档旧计划而失效：
 
-优点：实现简单，行为稳定，测试容易。
+- 模型不能直接访问数据库、修改任务状态或自由调用预约写操作；`createAppointment` 不向模型注册为工具。
+- “好的”“确认”等聊天内容不能代替具体方案确认。确认请求绑定 `taskId`、`planId`、`planVersion` 和幂等键；患者身份来自服务端解析。
+- 方案过期或版本变化不能静默继续提交；号源不可用不能换成另一个号源后冒充原方案成功。
+- 预约方案引用真实查询结果。当前 DeepSeek 适配器从本轮返回号源查找 `slotId`，医生、科室、日期和时段采用该记录，不能接受模型编造的号源元数据。
+- Agent 和普通挂号共用预约写入口。幂等、占号和审计不能只放在聊天入口。
+- 模型回复不是预约成功证据，Agent 在创建后查询核验；用户只能读取本人任务和预约。REST 和 SSE 从 Spring Security 会话取得患者身份，Runtime 用该身份检查任务归属。
+- 资料检索不能替代号源查询、权限检查或强制预约规则。资料只作为回答依据，不能获得执行指令权限。
+- 项目使用合成医院数据；导诊用于就诊方向参考，不提供诊断、处方或个体化用药。当前急症提示主要依赖模型提示词，尚无经医学审核的代码规则系统，不能声称临床安全能力已验证。
+- 工具与状态轨迹面向追溯，不展示模型隐藏思考、密钥或未经处理的异常堆栈。
 
-缺点：模型只负责抽取字段，不能根据工具结果灵活调整步骤；Agent 特征较弱。
+## 3. 模块职责与实际接口
 
-适用场景：普通表单式预约，不适合作为本项目的主要展示方式。
+### 3.1 AgentRuntime
 
-### 方案 B：完全开放式 Agent
-
-模型可以自由选择所有工具、改变任务状态并尝试执行写操作。
-
-优点：模型自主性强，演示效果直观。
-
-缺点：难以保证权限、确认、并发和业务规则；出错时很难定位和复现。
-
-适用场景：低风险的信息查询，不适合预约写操作。
-
-### 方案 C：受限 Agent，推荐
-
-模型只在允许的任务状态下选择只读工具或提出下一步问题；后端控制状态迁移，预约方案由后端保存，写操作通过独立确认命令执行。
-
-优点：同时保留 Agent 的动态决策能力和业务系统的确定性；工具调用可审计，任务可恢复，失败可测试。
-
-缺点：需要设计状态机、决策协议和确认门禁。
-
-MediFlow 采用方案 C，因为它最能体现业务 Agent 的价值，也能控制个人项目的实现风险。
-
-## 3. 模块与职责
-
-### 3.1 `AgentRuntime`：外部唯一入口
-
-这是 Agent 模块对外提供的深接口。Controller、SSE 适配器和测试只依赖它，不直接操作模型或工具。
+[AgentRuntime](../../src/main/java/com/mediflow/agent/agent/AgentRuntime.java)提供消息处理、确认和查询任务快照入口；另有接收进度回调的消息重载。
 
 ```java
-public interface AgentRuntime {
-    AgentTurnResult handleMessage(TaskId taskId, Principal principal, String message);
-
-    ConfirmationResult confirmPlan(
-            TaskId taskId,
-            Principal principal,
-            PlanId planId,
-            int planVersion,
-            String idempotencyKey);
-
-    TaskSnapshot getTask(TaskId taskId, Principal principal);
-}
+AgentTurnResult handleMessage(TaskId taskId, Principal principal, String message);
+ConfirmationResult confirmPlan(TaskId taskId, Principal principal, PlanId planId,
+                               int planVersion, String idempotencyKey);
+TaskSnapshot getTask(TaskId taskId, Principal principal);
 ```
 
-这个接口的使用约束：
+任务创建由 API 应用服务调用状态存储完成。Controller 不自行执行模型工具或直接写预约。
 
-- `handleMessage` 只接收用户消息，不接受模型伪造的状态或身份；
-- `confirmPlan` 是后端命令，不通过 LLM 解析“好的”“确认”等自然语言；
-- 两个方法都必须验证任务归属和用户身份；
-- 返回值包含用户消息、当前状态和可展示事件摘要；
-- 内部模型、工具和状态存储可以替换，调用方不需要知道实现细节。
+### 3.2 模型适配器
 
-### 3.2 `DecisionModel`：模型适配器
+[DeepSeekDecisionModel](../../src/main/java/com/mediflow/agent/config/DeepSeekDecisionModel.java)将上下文和工具规格交给 LangChain4j `ChatLanguageModel`。模型的 `tool_calls` 映射为只读调用，普通响应解析为受限 JSON 决策。模型适配器对协议错误最多进行一次纠正；提供方网络错误不走该纠正循环。
 
-`DeepSeekDecisionModel` 使用 LangChain4j OpenAI 兼容接口，把任务上下文和只读工具 JSON Schema 发送给 DeepSeek，并将 `tool_calls` 响应映射为 `CALL_READ_TOOL`。普通文本响应必须是受限 JSON，再映射为 `ASK_USER`、`PROPOSE_PLAN` 或 `FINISH`。患者身份与方案过期时间由后端注入，不由模型决定。未配置 `DEEPSEEK_API_KEY` 时，`DemoDecisionModel` 作为确定性本地演示适配器。
+未配置对话 Key 时，[DemoDecisionModel](../../src/main/java/com/mediflow/agent/config/DemoDecisionModel.java)提供确定性演示决策。这不代表整个 Spring Boot 应用在无数据库环境下已有完整可用的门户；当前业务 API 使用 `mysql` profile。
+
+`DecisionModel` 主要决策为 `AskUser`、`CallReadTool`、`ProposePlan` 和 `Finish`。科室推荐可以作为结构化建议保存；未知工具、无法解析的响应和无依据方案不能直接产生预约写入。
+
+### 3.3 只读工具
+
+[ReadToolSpec](../../src/main/java/com/mediflow/agent/agent/ReadToolSpec.java)当前仅保存名称与说明；工具 JSON 参数规格由 DeepSeek 适配器构建，参数校验由具体执行器负责，调用状态由 Runtime/TaskContext 约束。当前没有独立的“每工具允许状态注册表”。工具开始、结果和耗时由 Runtime 记录。
+
+| 能力 | 当前代码状态 |
+|---|---|
+| `findAvailableSlots` | 已向 DeepSeek 声明；支持科室、医生和可选日期/时段，查询结果含替代条件提示 |
+| `getAppointmentRules` | 已向 DeepSeek 声明；返回搜索期、确认要求和取消改约能力等技术限制。患者资料咨询走知识工具 |
+| `searchHospitalKnowledge` | 已进入 DeepSeek 工具规格。直接产出只读资料回复及引用，区分无依据和服务故障，保留预约状态 |
+| 科室/医生目录、我的预约 | 有门户接口；当前不是模型独立工具 |
+| 预约创建与核验 | 后端确认流程内部调用，不是模型自由选择的工具 |
+
+相关代码：[MySqlReadToolExecutor](../../src/main/java/com/mediflow/agent/appointment/MySqlReadToolExecutor.java)、[SlotQueryService](../../src/main/java/com/mediflow/agent/appointment/SlotQueryService.java)、[AgentRuntimeConfiguration](../../src/main/java/com/mediflow/agent/config/AgentRuntimeConfiguration.java)。
+
+普通挂号调用严格查询；Agent 查询可以放宽日期后再放宽时段，保留原科室和医生条件，并返回 `exactMatch=false` 和说明。自动寻找其他医生并不是这条放宽逻辑已具备的能力。
+
+### 3.4 预约业务服务
+
+[AppointmentApplicationService](../../src/main/java/com/mediflow/agent/agent/AppointmentApplicationService.java)的实际接口为：
 
 ```java
-public interface DecisionModel {
-    AgentDecision decide(DecisionContext context, List<ReadToolSpec> tools);
-}
+AppointmentExecutionResult createConfirmedAppointment(
+        AppointmentPlan plan, Principal principal, String idempotencyKey);
+AppointmentVerificationResult verify(String appointmentId, Principal principal);
 ```
 
-`AgentDecision` 只能是以下几类：
+`MySqlAppointmentApplicationService`将 Agent 参数转换为预约命令，委托[AppointmentWriteService](../../src/main/java/com/mediflow/agent/appointment/AppointmentWriteService.java)。后者也承接普通挂号，负责事务内方案校验、号源行锁/条件更新、幂等判定及审计。不能将所有 Runtime 状态检查点与预约写入描述成一个跨层总事务。
 
-```text
-ASK_USER(question, missingFields)
-CALL_READ_TOOL(toolName, typedArguments)
-PROPOSE_PLAN(planDraft)
-FINISH(message)
-```
+### 3.5 任务存储
 
-模型返回未知决策、非法参数或不符合当前状态时，不得执行写操作。真实模型适配器对协议异常最多请求一次格式纠正，仍失败则记录安全原因码并保留可重试状态；未知工具或非法业务方案仍受控拒绝。预约方案只能引用本轮实际查询到的号源，不能猜测模型意图或补造号源。
+[TaskStateStore](../../src/main/java/com/mediflow/agent/agent/TaskStateStore.java)当前接口是 `create(sessionId, patientId)`、`load(taskId)`、`save(context)`，没有单独的 `appendEvent` 方法。
 
-### 3.3 `ReadToolExecutor`：只读工具执行器
+MySQL 实现将任务、轮次、工具记录、方案和状态迁移作为检查点保存，使用 `state_version` 乐观锁；内存实现供行为测试使用。Redis 租约、限流与缓存尚未接入。
 
-工具注册表维护工具名称、输入约束、允许状态和实现适配器。
+## 4. 执行限制与当前状态行为
 
-```java
-public interface ReadToolExecutor {
-    ToolResult execute(ToolCall call, TaskSnapshot task);
-    List<ReadToolSpec> tools();
-}
-```
+- `mediflow.agent.max-steps` 默认 8，限制**单次消息处理的决策循环**。任务的 `stepCount` 累计计数，不是当前代码执行的整任务总上限。
+- 模型决策每次最多等待 15 秒，只读工具每次最多等 5 秒。同一消息的模型和工具共享 45 秒预算，页面查号也使用只读工具限时。超时尝试取消并中断工作线程。短暂故障最多自动重试一次，DeepSeek SDK 的自动重试已关闭。预约写入单独由显式确认驱动。
+- 消息接口检查非空；当前没有声明消息最大长度约束。
+- `ASK_USER` 在未产生候选时进入 `NEED_MORE_INFO`。待选择或待确认阶段的只读回复可继续保留现状。
+- 查号合并本轮提交的条件，保存真实候选后进入 `PROPOSAL_READY`。患者从该批候选选择号源，后端重检并生成确认单，进入 `AWAITING_CONFIRMATION`。实际修改条件会使旧方案失效。只读回复保留方案。
+- `FINISH`、预约核验成功会进入 `COMPLETED`。旧终态继续保留。S4 从本人预约开启单独的 `VISIT_CONSULTATION`，走预约事实和资料工具的只读路径。
+- 模型异常、暂时工具故障和非法工具参数有保留可重试状态的路径。预约冲突后保留需求，作废旧确认单与候选并回到 `SEARCHING`。提交结果不确定时保留 `EXECUTING`，已知原预约但尚未核验时保留 `VERIFYING`。核验入口按原方案查询并更新任务状态，显式重试仅适用于原结果暂未查到且仍可提交的原请求。见[S5 验收](../product/s5-booking-recovery.md)。
+- `CANCELLED`存在于状态定义和允许迁移中，但当前没有面向患者的取消任务/取消预约接口，不能以枚举存在推断功能已完成。
 
-执行器负责：
+共享条件、候选与确认的新协议见[S2 验收](../product/s2-appointment-options.md)。
 
-- 校验工具是否存在；
-- 校验当前状态是否允许调用；
-- 校验参数类型和业务范围；
-- 注入当前用户身份；
-- 调用预约领域服务；
-- 返回稳定的结构化结果和错误码；
-- 记录工具调用事件。
+## 5. SSE 与患者回复
 
-### 3.4 `AppointmentApplicationService`：业务写入模块
+实现入口是[AgentTaskController](../../src/main/java/com/mediflow/agent/api/AgentTaskController.java)，没有单独实现名为 `AgentEventPublisher` 的组件。
 
-预约创建不作为模型可自由调用的工具，而由确认命令进入预约应用服务：
+| 路径 | 当前语义 |
+|---|---|
+| `POST /api/v1/tasks/{taskId}/messages/stream` | 先启动 SSE，再发送工具进度、已保存的回复文本及本轮结果 |
+| `GET /api/v1/tasks/{taskId}/events` | 查询已持久化的状态与工具记录，逐条回放后关闭；不是持续订阅 |
+| `GET /api/v1/tasks/{taskId}/trace` | 查询本人任务的轮次、动作、状态、尝试次数、耗时及简要原因 |
 
-```java
-public interface AppointmentApplicationService {
-    AppointmentExecutionResult createConfirmedAppointment(
-            ConfirmedPlan plan,
-            Principal principal,
-            String idempotencyKey);
+SSE 进度随任务执行发送，最终文本以单条 `MESSAGE_DELTA` 发送，与数据库保存的回复及 `RESULT.message` 一致。
 
-    AppointmentVerificationResult verify(AppointmentId appointmentId, Principal principal);
-}
-```
+前端流式 POST 由 `fetch` 读取，历史 GET 回放用 `EventSource`。断线重发沿用原消息标识，读取已保存的回复或提示处理中。已收到临时失败结果后，患者可以发起新一轮处理。多实例事件分发后置。
 
-这个模块内部负责方案版本、身份、预约规则、号源占用、幂等和事务。AgentRuntime 只负责组织调用，不复制这些业务规则。
+## 6. 架构取舍与验证边界
 
-### 3.5 `TaskStateStore`：任务状态适配器
-
-正式运行使用 MySQL 实现，AgentRuntime 不依赖具体存储技术；核心行为测试仍可使用内存实现。
-
-```java
-public interface TaskStateStore {
-    TaskContext load(TaskId taskId);
-    void save(TaskContext context);
-    void appendEvent(TaskEvent event);
-}
-```
-
-Redis 用于同一任务的短租约、限流和可重建缓存，不作为任务状态的唯一存储。MySQL 事务、行锁或乐观锁负责最终一致性。
-
-当前代码已提供 `MySqlTaskStateStore`：任务检查点使用 `agent_task.state_version` 做乐观锁，任务轮次、工具调用、方案和状态事件在同一事务中保存；加载任务时会恢复这些持久化记录。`InMemoryTaskStateStore` 仅用于行为测试。
-
-### 3.6 `AgentEventPublisher`：前端轨迹适配器
-
-负责把领域事件转换为 SSE 或其他前端传输格式。它不参与 Agent 决策。
-
-可展示事件包括：
-
-```text
-TASK_STARTED
-QUESTION_ASKED
-READ_TOOL_STARTED
-READ_TOOL_SUCCEEDED
-READ_TOOL_FAILED
-PLAN_PROPOSED
-CONFIRMATION_REQUIRED
-EXECUTION_STARTED
-EXECUTION_VERIFIED
-TASK_COMPLETED
-TASK_FAILED
-```
-
-轨迹只展示状态、工具名称、参数摘要和结果摘要，不展示模型内部隐藏思考过程，也不把未经处理的异常堆栈发送给用户。
-
-## 4. AgentRuntime 的执行规则
-
-### 4.1 处理用户消息
-
-```text
-1. 加载任务和当前用户
-2. 校验任务归属、状态和消息长度
-3. 将用户消息加入当前 turn
-4. 在最大步骤数内循环：
-   a. 根据当前上下文调用 DecisionModel
-   b. 校验模型决策是否符合当前状态
-   c. ASK_USER：保存问题，进入 NEED_MORE_INFO，暂停
-   d. CALL_READ_TOOL：执行只读工具，保存结果，继续循环
-   e. PROPOSE_PLAN：生成有版本的方案，进入 AWAITING_CONFIRMATION，暂停
-   f. FINISH：进入 COMPLETED 或明确失败终态
-5. 超过最大步骤数：进入 FAILED，说明任务需要重新开始或人工处理
-```
-
-### 4.2 处理确认命令
-
-```text
-1. 加载任务、当前用户和候选方案
-2. 必须处于 AWAITING_CONFIRMATION
-3. 校验 planId、planVersion、expiresAt 和患者身份
-4. 重新查询并锁定号源
-5. 校验预约规则和幂等键
-6. 执行预约创建
-7. 进入 VERIFYING
-8. 重新查询预约记录
-9. 核验成功进入 COMPLETED，否则进入 FAILED 或待处理状态
-```
-
-用户输入“确认”不能直接作为数据库写操作条件，必须由前端携带具体方案标识和版本，由后端完成校验。
-
-## 5. 状态与允许动作
-
-| 状态 | 模型允许 | 后端允许 |
+| 原方案 | 原理与优点 | 代价/适用性 |
 |---|---|---|
-| `UNDERSTANDING` | 追问、调用基础只读工具 | 创建或更新任务上下文 |
-| `SEARCHING` | 调用只读工具、继续追问 | 校验工具和参数 |
-| `NEED_MORE_INFO` | 生成问题 | 保存用户补充信息 |
-| `PROPOSAL_READY` | 调整查询或形成方案 | 保存候选方案 |
-| `AWAITING_CONFIRMATION` | 解释方案、等待用户 | 接受具体确认命令；用户继续调整需求时使旧方案失效并返回查询，新方案需要重新确认 |
-| `EXECUTING` | 不参与写入决策 | 执行确认后的预约 |
-| `VERIFYING` | 不参与结果判定 | 查询并核验预约 |
-| `COMPLETED` | 生成最终说明 | 只读任务结果 |
-| `FAILED` | 生成失败说明 | 记录原因和有限重试 |
+| 固定流程 | 代码固定步骤，行为稳定、容易测试 | 适合普通挂号；对变化需求的自主处理有限 |
+| 完全开放 Agent | 模型自由选择全部工具与动作 | 权限、写入确认和一致性难控制，未采用 |
+| 当前受限 Agent | 模型选择只读行动，后端掌握状态与写入 | 需要协议和状态设计；符合当前预约约束，保留 |
 
-不允许模型自行把任务从 `AWAITING_CONFIRMATION` 改为 `EXECUTING`，也不允许模型返回“预约已成功”作为事实依据。
+[核心行为测试](../../src/test/java/com/mediflow/agent/agent/AgentRuntimeServiceTest.java)通过可控模型验证工具循环、确认、版本/期限、幂等与失败路径；MySQL 验证通过专用脚本运行。既往测试项数与真实模型体验属于历史验收，本轮没有重新验证，不能把文档更新当作功能通过证明。
 
-## 6. 首版只读工具
-
-首版建议注册以下工具：
-
-```text
-searchDepartments
-searchDoctors
-findAvailableSlots
-getAppointmentRules
-verifyAppointment
-```
-
-`queryDoctorSchedule` 可以作为 `findAvailableSlots` 的内部查询步骤，不一定暴露给模型。工具越少，模型越容易选择正确，测试矩阵也越小。
-
-首版不把 `createAppointment` 注册到模型工具列表。它是确认命令后由后端直接调用的业务能力。
-
-## 7. 确认方案
-
-`PROPOSE_PLAN` 产生的是后端可验证的 `AppointmentPlan`，至少包含：
-
-```text
-planId
-planVersion
-patientId
-departmentId
-doctorId
-slotId
-appointmentDate
-timeRange
-expiresAt
-```
-
-计划展示给用户前，后端生成版本标识或内容摘要。确认命令必须携带同一版本；如果号源、排班或规则发生变化，确认失败并重新查询，不能自动替换方案。
-
-## 8. 无数据库阶段的实现方式
-
-在数据库设计前，可以使用以下适配器完成 AgentRuntime 验证：
-
-- `InMemoryTaskStateStore`：保存任务和事件；
-- `FakeAppointmentCatalog`：提供固定科室、医生和号源；
-- `FakeAppointmentApplicationService`：模拟号源占用、幂等和核验；
-- `FakeDecisionModel`：测试中返回预先定义的决策序列；
-- `DeepSeekDecisionModel`：配置 API Key 后调用 DeepSeek Function Calling。
-
-这样可以先验证 Agent 的核心行为：追问、工具循环、方案暂停、确认门禁、号源失效和失败终态。后续引入数据库时，只需要替换状态存储和预约领域适配器，不需要重写 AgentRuntime。
-
-## 9. 核心测试面
-
-AgentRuntime 的测试不依赖真实模型，通过 `FakeDecisionModel` 控制决策序列：
-
-- 缺少日期时返回 `ASK_USER`；
-- 模型选择只读工具后能收到工具结果并继续；
-- 非法工具名或非法参数会被拒绝；
-- 达到最大步骤数会失败，不会无限循环；
-- 形成方案后进入 `AWAITING_CONFIRMATION`；
-- 用户拒绝或未确认时不会调用预约写入模块；
-- 过期或版本不匹配的方案不能执行；
-- 重复幂等键不会重复创建预约；
-- 写入后必须执行核验；
-- 工具失败、模型异常和核验失败都有明确终态；
-- 用户只能访问自己的任务和预约。
-
-真实 DeepSeek 调用只用于少量适配器测试和演示，不作为核心业务测试的唯一依据。
-
-## 10. 已确定与暂不决定的事项
-
-已确定：
-
-- Java + Spring Boot + LangChain4j；
-- MySQL 作为业务持久化数据源；
-- Redis 用于任务短租约、限流及可重建缓存；
-- Vue 前端；
-- DeepSeek 模型服务。
-
-暂不决定：
-
-- 任务和事件的最终表结构；
-- RAG 的切块、索引和知识库管理页面；
-- 取消、改期和多任务并行。
-
-逻辑数据模型已记录在[数据模型 v1](../database/data-model-v1.md)中，后续再评审并生成 DDL。
+患者登录、候选选择、结构化需求调整与首批资料来源已经本地验证。资料回复及来源按轮次持久化，历史资料正文不进入后续模型提示。见[S3 验收](../product/s3-knowledge-consultation.md)。S4 的关联咨询保持原预约任务终态，见[S4 验收](../product/s4-visit-preparation.md)。

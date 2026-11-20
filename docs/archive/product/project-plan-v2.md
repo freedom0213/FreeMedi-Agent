@@ -1,6 +1,10 @@
 # MediFlow Agent 项目计划 v2
 
-> 执行入口已迁移到[整体交付计划 v1](delivery-roadmap-v1.md)。本文保留 Agent 业务边界和早期范围决策；阶段顺序、RAG 必做范围和最终验收以总计划为准。
+> 归档标识：2026-11-17。原位置：`docs/product/project-plan-v2.md`。
+> 本文保存历史规划、实施与验证语境；其中“当前/下一步/必须”不作为当前执行指令，历史验收不等于本轮复测。
+> 当前入口见[文档首页](../../README.md)，归档说明见[归档索引](../README.md)。正文保留历史内容，仅调整引用；后续状态不在本文维护。
+
+> 执行入口已迁移到[整体交付计划 v1](../../product/delivery-roadmap-v1.md)。本文保留 Agent 业务边界和早期范围决策；阶段顺序、RAG 必做范围和最终验收以总计划为准。
 
 > 版本：v2
 >
@@ -247,7 +251,7 @@ Spring Boot
 └── audit             工具日志和业务审计
 ```
 
-技术栈版本和取舍记录在[技术栈决策 v1](../architecture/tech-stack-v1.md)。当前基线为：
+技术栈版本和取舍记录在[技术栈决策 v1](../../architecture/tech-stack-v1.md)。当前基线为：
 
 - Java 17 + Spring Boot 3.4.5 + Spring MVC；
 - LangChain4j 0.35.0，调用 DeepSeek OpenAI 兼容接口；

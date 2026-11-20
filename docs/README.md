@@ -1,48 +1,72 @@
-# FreeMedi-Agent 文档索引
+# FreeMedi-Agent 文档入口
 
-## 当前基线
+> 更新日期：2026-11-20。用户已确认首版功能范围。[首版交付计划](product/delivery-roadmap-v1.md)维护核心、后置、验收与 S0—S6 顺序。
+> S0 日期基线已恢复，S1 患者真实登录、身份隔离与预约正确性基线已验收。见[S1 验收及演示账号](product/s1-patient-session-acceptance.md)。需求与候选见[S2 验收](product/s2-appointment-options.md)，资料问答见[S3 验收](product/s3-knowledge-consultation.md)，预约后咨询见[S4 验收](product/s4-visit-preparation.md)，预约恢复、限时与追踪见[S5 验收](product/s5-booking-recovery.md)。
+> [S6 综合验收](product/s6-local-acceptance.md)记录真实 DeepSeek、Qdrant 和 Chrome 的结果，包括医生与科室引用、资料下架以及本地启动步骤。
 
-| 分类 | 文档 | 用途 | 状态 |
-|---|---|---|---|
-| 设计 | [前端方向 v1](design/frontend-direction-v1.md) | 产品门户定位、页面信息架构和视觉原则 | 已确认 |
-| 设计 | [前端布局方案 v1](design/frontend-layout-v1.md) | 患者端页面、Agent 流程和后续管理端布局 | 患者端首版已实现 |
-| 产品 | [项目计划 v2](product/project-plan-v2.md) | 项目范围、业务主线和验收标准 | 当前产品基线 |
-| 产品 | [整体交付计划 v1](product/delivery-roadmap-v1.md) | Agent、RAG、预约业务、前端和简历交付阶段 | 当前执行计划 |
-| 产品 | [患者导诊与预约修复记录](product/patient-guide-acceptance.md) | 用户反馈、修复边界、验证证据与复测建议 | 本轮已验证 |
-| 产品 | [项目现状文档](product/project-status.md) | 初始规划和讨论记录 | 历史参考 |
-| 架构 | [Agent Runtime v1](architecture/agent-runtime-v1.md) | Agent 执行循环、模块职责、状态和确认门禁 | 当前技术基线 |
-| 架构 | [持久化实现 v1](architecture/persistence-v1.md) | MySQL 任务恢复、乐观锁和 Flyway 迁移 | 当前实现基线 |
-| 架构 | [技术栈决策 v1](architecture/tech-stack-v1.md) | 语言、框架、基础设施和版本基线 | 当前技术基线 |
-| 数据库 | [数据模型 v1](database/data-model-v1.md) | MySQL 实体、约束、事务和 Redis 职责 | 当前逻辑设计 |
+## 阅读顺序
 
-## 目录约定
+1. [首版交付计划](product/delivery-roadmap-v1.md)：四个患者业务页面、七项核心、五类工程支撑、后置范围、A01—A18 验收及 S0—S6 开发顺序；同时标注已有基础和待补内容。
+2. [S0 复核与基线记录](product/s0-baseline-2026-11-17.md)：修复前后测试、配置环境、代码遗留与 S1 放行边界；此前静态检查见[产品核查记录](product/project-review-2026-11-17.md)。
+3. [Agent 架构](architecture/agent-runtime-v1.md)、[数据模型](database/data-model-v1.md)：理解当前运行机制及业务边界。
+4. 要继续某个具体话题时，再阅读对应的技术或设计文档；历史资料统一进入[归档索引](archive/README.md)。
 
-- `docs/product/`：产品目标、范围、流程和验收标准；
-- `docs/architecture/`：Agent 运行时、模块接口和系统架构；
-- `docs/database/`：数据模型、索引、事务和迁移设计；
-- `database/`：可执行但需要人工审阅的数据库脚本；
-- `src/`：后续 Spring Boot 后端代码；
-- `web/`：后续 Vue 前端代码。
+## 活跃文档及职责
 
-## 当前状态
+| 文档 | 维护什么 | 如何使用 |
+|---|---|---|
+| [首版交付计划](product/delivery-roadmap-v1.md) | 已确认范围、代码现状、验收标准与 S0—S6 阶段 | 唯一执行总纲；功能批准不代表代码已实现或具体架构已获批准 |
+| [S0 复核与基线记录](product/s0-baseline-2026-11-17.md) | 实测基线、日期修复、环境阻碍和 S1 启动依据 | 区分 S0 修复后 122 项与 S1 新增场景后的 128 项，不把未测项计通过 |
+| [S1 验收](product/s1-patient-session-acceptance.md) | 登录接口、合成账号、双患者隔离和浏览器预约证据 | 查看本地演示与复验步骤 |
+| [S2 验收](product/s2-appointment-options.md) | 共享需求、候选选择、确认和本地验收 | 查看接口、流程与后续验证边界 |
+| [S3 首批验收](product/s3-knowledge-consultation.md) | 资料检索、来源、无依据和故障处理 | 核对浏览器验收和本地导入方式 |
+| [S4 验收](product/s4-visit-preparation.md) | 预约关联就诊准备、只读约束与身份隔离 | 复验普通挂号和 Agent 两种预约来源 |
+| [S5 验收](product/s5-booking-recovery.md) | 预约恢复、模型和工具限时、有限重试、任务追踪 | 复验超时、网络中断、刷新、原单核验与真实 DeepSeek 查号 |
+| [S6 验收和本地演示](product/s6-local-acceptance.md) | 真实依赖综合验收、资料维护、Windows 启动、求职演示流程 | 演示前按步骤准备近期号源、资料索引与测试账号 |
+| [前端浏览器回归](../web/e2e/README.md) | 两条预约路径、跨页返回、窄屏和失败恢复 | 修改前端后用模拟接口复验 |
+| [产品核查记录](product/project-review-2026-11-17.md) | 日期明确的源码问题、用户约束、整理记录 | 讨论范围的事实依据，不另建排期 |
+| [M3 实现与遗留项](product/m3-rag-plan.md) | 知识导入、索引、检索和 Agent 接入现状 | 保留历史 M3 编号，当前实施与验收统一归入主计划 S3 |
+| [Agent Runtime](architecture/agent-runtime-v1.md) | 模型、工具、状态、确认与恢复 | 以当前接口与代码路径说明能力和限制 |
+| [持久化实现](architecture/persistence-v1.md) | MySQL 检查点、预约事务、迁移、SSE/索引边界 | 不将分离的事务或事件回放误写成完整恢复 |
+| [技术栈决策](architecture/tech-stack-v1.md) | 实际依赖、技术选择和计划/验证状态 | 区分源码版本、历史环境和未落地能力 |
+| [数据模型](database/data-model-v1.md) | V1—V8 迁移、字段、外键、事务与未使用列 | 以迁移与实际写路径为依据，不以字段存在宣称功能完成 |
+| [前端方向](design/frontend-direction-v1.md) | 已确认门户定位、任务操作方向、视觉原则 | 页面职责与功能范围已确认；具体线框与接口需实施前评审 |
+| [页面布局与实现对照](design/frontend-layout-v1.md) | 患者页面、登录及旧交互意图的落差 | 核对当前页面及旧设计中待实现的能力 |
 
-项目英文名称已确认为 **FreeMedi-Agent**。README 暂不修改。前端视觉方向已确认为 A+B：Codex 式克制视觉与 Linear 式状态组织；首页定位为智慧医院就诊服务门户，不是对话编辑器。
+## 当前项目基线
 
-项目已完成 AgentRuntime 核心行为、MySQL 持久化、只读号源查询工具、预约写服务、最小 HTTP/SSE API 和 DeepSeek Function Calling 适配器的首版实现。任务恢复、方案/轮次/工具/状态事件保存、乐观锁、确认后原子占用号源、预约幂等与核验均已接入；MySQL 集成测试在 8.0.34 上验证，MySQL 8.4 尚未验证。患者导诊已调整为症状优先、口语日期、同科室备选时间和可继续调整的待确认方案；模型协议异常有一次有限纠正，临时故障可重试。V4 已追加近期合成排班和号源，V5 已补神经内科和消化内科演示数据。患者端已支持发起智能分诊和发送消息即时显示。真实模型 HTTP 场景及浏览器预约闭环已通过；**122 项自动化测试全部执行通过（0 失败 0 跳过，含 45 项隔离 MySQL 集成测试）**，注意裸 `mvn test` 会跳过这些集成测试，必须通过 `scripts/test-mysql.ps1` 运行才等价于全量通过，项数以该脚本的输出为准。向量库适配器另有 16 项，需要真实 Qdrant，由 `scripts/test-qdrant.ps1` 单独运行并在执行前确认服务可达。最近号源请求经修复后重复实测通过。详情与限制见[患者导诊与预约修复记录](product/patient-guide-acceptance.md)。
+- 产品名 **FreeMedi-Agent**，旧 Java 包名与数据库名仍使用 `mediflow`。
+- 首页、智能导诊、普通挂号、我的预约已有源码与首版接口；全项目并非只有聊天入口。
+- 单 Agent 有动态只读工具循环；预约写入通过独立确认、共用业务服务与核验。任务状态、幂等和事务是已有工程基础，仍有边界与恢复缺口。
+- S1 第一批已补预约写时的未来时间、开放排班及医生/科室启用检查，并增加 6 项集成场景；普通挂号页已补筛选清旧选择、查询中禁提交及过期响应丢弃，随后通过浏览器流程验收。
+- 智能办理页同时支持表单和对话。需求更新后可比较最多三个真实号源，选中后才显示确认单。预约后可从「我的预约」开启本次就诊的独立只读咨询。
+- S3 首批已接通就诊准备与预约规则，患者可展开来源，查无依据与 Qdrant 故障分别提示。科室、医生资料覆盖和生命周期验收仍有后续工作。
+- 真实登录和本人任务/预约隔离已完成基线。管理端与 Redis 协调/限流尚未完成。Compose 当前只提供 Qdrant，不是整套系统一键部署。
+- 现有知识导入器直接发布受控资料，没有审核发布工作流；知识规则与软件能办理的业务有不一致，本轮未改运行输入或擅自确定政策。
 
-M2 已提供不经过 Agent 的普通业务入口：科室目录、科室下医生、严格号源查询、普通挂号下单和我的预约，均只暴露启用中的目录数据，且只能读取本人预约；业务冲突返回 HTTP 200 加业务码。普通挂号与 Agent 确认共用同一个写入口，并发争抢同一号源只会成功一次；`operation_audit_log` 会记录成功、被拒和失败三种结果。内部设计见[M2 完整预约服务实施方案](product/m2-appointment-service-plan.md)，验收证据见[M2 完整预约服务验收记录](product/m2-acceptance.md)。
+## 已确认的首版边界
 
-M3 进行中（第 3/6 块）：医院资料已有文档与片段两层存储，可用 `scripts/import-knowledge.ps1` 把 `knowledge/` 下的资料切块入库，内容未变的文件会被跳过，改过的资料升版本并下架旧版本。向量索引落在 **Qdrant** 上（`docker-compose.yml` 只放这一个服务），用 `scripts/index-knowledge.ps1` 建立、`-Rebuild` 整体重建；默认走**本地中文模型**（512 维，无需 Key），所以索引与检索都不依赖外部服务。集合按模型命名，换模型必然换集合，重建前检索会明确回答"索引尚未建立"而不是"没有这条资料"。索引只存向量与过滤字段，**不存正文也不存号源**，随时可由 MySQL 重建；`scripts/test-qdrant.ps1` 在真实向量库上验证适配器。语义检索接入 Agent 与引用展示见[M3 实施方案](product/m3-rag-plan.md)。Redis 尚未接入。所有医院数据均为合成演示数据。技术基线已经确定：
+- 核心：需求可调整、真实候选与选择、按查询结果调整行动、可靠预约、有来源资料、咨询与办理衔接、失败后续办；仍以当前实现表判断完成情况，不能把计划写入视为完成。
+- 支撑：预置患者最小真实登录与本人隔离、可命令行操作的资料生命周期、任务工具追踪、自动化和真实模型/RAG 评估、干净开发环境可复现演示。
+- 后置：完整管理台、取消改期、复杂账号中心、长期记忆、候补通知、高级检索、多 Agent/MCP、Redis 与多实例等；支付/真实医院/诊断用药不做。
+- 本地求职展示不降低工程严谨性，无公网部署要求。阶段与验收只在主计划维护，不在各设计文档另起排期。
 
-- Java 17 + Spring Boot 3.4.5 + LangChain4j 0.35.0；
-- MySQL 8.4 作为持久化事实来源；
-- Redis 7.4 用于短期任务协调、限流和可重建缓存；
-- Vue 3.5 + TypeScript + Vite 作为前端；
-- DeepSeek 作为模型服务；
-- Git 以本地提交为主，远程仓库为 `freedom0213/FreeMedi-Agent`，仅在明确要求时推送。
+## 归档与其他资料
 
-API key 保存在 Git 忽略的本地外置配置 `config/application-mysql.yml`，从项目根目录以 `mysql` profile 启动会自动加载，无需每次重新配置。演示 API 使用 `X-Demo-User-Id` 识别本地账号。SSE 现有两条不同路径：`POST /api/v1/tasks/{taskId}/messages/stream` 是真实模型增量流（未配置 Key 时使用本地确定性回退），`GET /api/v1/tasks/{taskId}/events` 是已持久化事件的回放。
+- **已归档**：最早项目草案、项目计划 v2、M2 实施方案、M2 验收、导诊修复记录，以及早期风格候选图。旧路线与 M3 文档各保留一份整理前快照，详见[归档索引](archive/README.md)。
+- 归档内容保留原有日期、验收数字和决策过程，只补历史标识并修复链接；不作为当前需求或完成证明。
+- [knowledge/](../knowledge/) 的 6 篇 Markdown 是 RAG 导入输入。S3 已按实际能力更新合成预约说明，使用已有库时需重新导入和索引。
+- `.workbuddy/memory/` 的 3 篇本地开发记忆保持原位置，不入 Git；只作辅助线索，包含失效环境信息与敏感配置，不复制到公开文档。
+- [旧布局图](design/freemedi-layout-v1.svg)仍为布局附件，不能当作已实现页面；早期风格候选已归档。
 
-## 下一步推荐
+## 验证口径与后续
 
-2026-10-15 已完成最近号源追问修复、头痛/腹痛演示数据、智能分诊入口和发送即时显示。整体开发按[整体交付计划 v1](product/delivery-roadmap-v1.md)推进：M1（真实模型流式回复、结构化分诊推荐）与 M2（完整预约服务，含普通挂号与我的预约）已完成并有验收记录，M3（RAG 可用闭环）进行到第 3/6 块。**下一阶段是 M3 第 4 块**：把 `searchHospitalKnowledge` 接入 Agent 运行时并加医生目录校验，随后是引用呈现、M3 验收、M4（最小管理端）。每次会话报告计划中的阶段和证据，不再单独追加脱离总计划的下一步。
+2026-10-16 的历史记录包含隔离 MySQL 8.0.34 套件 122 项通过，另有 16 项真实 Qdrant 测试。2026-11-17 的新复测先发现 1 项日期失败，修复后恢复 122 项全过；S1 新增场景先验证 5 项失败，补写时检查后 **128 项全部通过，0 失败、0 错误、0 跳过，含 51 项 MySQL 集成测试**。两批证据分开保留。此批未执行真实 Qdrant 和模型生成验证。MySQL 8.4 仍无对应版本验证结论。
+
+以后复测可参考 [MySQL 脚本](../scripts/test-mysql.ps1)、[Qdrant 脚本](../scripts/test-qdrant.ps1)，不能把裸 Maven 跳过集成测试算全量通过。测试只写隔离实例；开发库仅只读核对，尚未续期近期号源。演示前应核对日期，必要时使用[续期脚本](../scripts/seed-demo-slots.ps1)。
+
+2026-11-18 跨日复测的 128 项全过。S1 收尾加入登录与隔离验证后，隔离 MySQL 套件 129 项全过，Vue 类型检查和 Vite 构建通过。实际 Chrome 验收包含双患者登录、普通挂号和 Agent 预约。见[S1 验收](product/s1-patient-session-acceptance.md)。
+
+2026-11-20 患者端发布前复验使用 `mvn -o test` 和 `pnpm test:e2e`。后端离线测试实际执行 91 项，全部通过，依赖外部服务的 73 项按条件跳过。前端构建和 10 项模拟浏览器回归均通过。真实依赖的验收记录见 [S6 综合验收](product/s6-local-acceptance.md)，前端复验入口见 [浏览器回归说明](../web/e2e/README.md)。
+
+管理端在患者端版本收尾后单独规划。重大接口、状态或数据库变更先评审影响并确认。只在明确要求时推送远端，文档不记录密钥或本地敏感值。

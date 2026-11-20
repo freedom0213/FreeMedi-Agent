@@ -1,138 +1,113 @@
-# MediFlow Agent 技术栈决策 v1
+# FreeMedi-Agent 技术栈与选型依据
 
-> 适用范围：首版可演示项目。
->
-> 版本策略：以下是可复现的基线版本。允许升级同一大版本内的安全补丁和兼容补丁；跨大版本升级必须重新验证 Spring Boot、LangChain4j、数据库迁移和前端构建链路。
+> 核对日期：2026-11-17。版本来自仓库构建文件、配置和源码；本轮未联网核对新版本、安装依赖或重新构建。
+> 本文说明现有技术与历史选型理由，不代表最终功能范围已重新确定。依赖存在、配置存在、代码实现、环境验证是不同状态。
 
-## 1. 已确定的完整技术栈
+## 1. 当前构建基线
 
-### 后端运行时
+后端依据 [pom.xml](../../pom.xml)，前端依据 [package.json](../../web/package.json) 和 [pnpm-lock.yaml](../../web/pnpm-lock.yaml)。由 Spring Boot 管理的传递版本应以实际依赖解析为准，本文不把历史估计当锁定版本。
 
-| 层 | 选择 | 基线版本 | 决策 |
-|---|---|---:|---|
-| JDK | Java | 17 LTS | 当前机器已有，Spring Boot 3.4 支持；首版不依赖虚拟线程特性 |
-| 构建 | Maven | 3.9.4 | 当前机器已有；后续加入 Maven Wrapper 固定构建版本 |
-| Web | Spring Boot + Spring MVC | 3.4.5 | 采用同步 MVC，事务和数据库调用模型更直观 |
-| Agent | LangChain4j | 0.35.0 | 与 `zhixu` 已有实现衔接，减少学习和兼容成本 |
-| HTTP 模型接入 | LangChain4j OpenAI 模块 | 与 LangChain4j 同版本 | 调用 DeepSeek 的 OpenAI 兼容接口 |
-| ORM | MyBatis-Plus Spring Boot 3 Starter | 3.5.9 | 延续 `zhixu` 经验，SQL 和事务边界可控 |
-| 数据库迁移 | Flyway | 10.x，由 Spring Boot BOM 管理 | 所有表结构变更可追踪、可回滚审查 |
-| 参数校验 | `spring-boot-starter-validation` | 由 Spring Boot 管理 | 工具参数和 REST 请求统一校验 |
-| 序列化 | Jackson | 由 Spring Boot 管理 | 统一 JSON 和结构化工具参数 |
+### 后端
 
-### 安全与基础设施
+| 技术 | 仓库声明 | 实际用途与边界 |
+|---|---|---|
+| Java | 17 | 编译目标；未使用 Java 21 虚拟线程特性 |
+| Spring Boot / MVC | 3.4.5 | HTTP、参数校验、同步业务服务和 `SseEmitter` |
+| LangChain4j core / OpenAI 模块 | 0.35.0 | DeepSeek 决策与流式回复适配，不替代状态机、事务或权限检查 |
+| MyBatis-Plus Starter | 3.5.9 | 依赖已引入；任务存储实际使用 MyBatis 注解 Mapper，预约/知识访问大量使用 `JdbcTemplate` |
+| Spring JDBC / Jackson / Validation | Spring Boot 管理 | SQL 与事务、JSON、请求校验；工具参数还有执行器手工校验 |
+| Flyway / Flyway MySQL | Spring Boot 管理 | V1—V8 迁移；基础配置默认关闭，`mysql` profile 开启 |
+| MySQL Connector/J | Spring Boot 管理 | MySQL JDBC 连接；数据库服务版本另见第 2 节 |
+| springdoc-openapi | 2.8.6 | WebMVC OpenAPI/UI 依赖已引入；文档路由本轮未运行验证 |
+| 本地 BGE 中文 ONNX Embedding | LangChain4j 0.35.0 对应模块 | 默认本地向量化，模型 `bge-small-zh-v1.5-q`、512 维 |
 
-| 层 | 选择 | 基线版本 | 决策 |
-|---|---|---:|---|
-| 认证授权 | Spring Security | 6.4.x，由 Spring Boot 管理 | 处理登录、角色和接口访问控制 |
-| Token | JJWT | 0.12.6 | 首版使用短期 Access Token；不引入 OAuth 服务端 |
-| 密码 | BCrypt | Spring Security 内置 | 密码只保存哈希 |
-| 关系数据库 | MySQL | 8.4 LTS | 预约、号源、任务和审计的事实来源 |
-| Redis | Redis | 7.4 | 任务短租约、限流和可重建缓存 |
-| Redis 客户端 | Spring Data Redis + Lettuce | 由 Spring Boot 管理 | 不额外引入 Redisson；正确性由 MySQL 保证 |
-| 本地编排 | Docker Compose | Compose v2 | 统一启动 MySQL、Redis 和应用依赖 |
-| API 文档 | springdoc-openapi | 2.8.6 | 提供接口和工具入口的可审阅文档 |
+Maven 3.9.4 是旧开发环境记录，不是仓库 Wrapper 固定的版本；当前未提供 `mvnw` / `mvnw.cmd`，本轮也没有确认本机 Maven 版本。
 
 ### 前端
 
-| 层 | 选择 | 基线版本 | 决策 |
-|---|---|---:|---|
-| Node.js | Node.js LTS | 24.x | 当前机器已有，使用 `.nvmrc` 固定主版本 |
-| 包管理 | pnpm | 11.x | 当前机器已有，安装速度和 lockfile 管理较好 |
-| 框架 | Vue | 3.5.13 | 与现有前端经验一致 |
-| 构建 | Vite | 6.2.0 | 开发启动快，配置少 |
-| 语言 | TypeScript | 5.7.3 | 约束 Agent 事件、任务状态和工具结果结构 |
-| 状态 | Pinia | 3.0.1 | 保存当前会话、任务和轨迹状态 |
-| 路由 | Vue Router | 4.5.0 | 患者端和管理端路由守卫 |
-| UI | Element Plus | 2.9.5 | 快速完成表单、表格、确认弹窗和状态标签 |
-| HTTP | Axios | 1.8.4 | REST 请求；SSE 使用浏览器原生 `EventSource` |
+| 技术 | 声明版本 | 实际用途 |
+|---|---:|---|
+| Vue | 3.5.13 | 患者端组件 |
+| TypeScript | 5.7.3 | 任务、方案、事件和门户数据类型 |
+| Vite | 6.2.0 | 开发服务与构建；开发配置代理 `/api`到后端 |
+| Pinia | 3.0.1 | 当前 Agent 任务、事件、流式临时文本 |
+| Vue Router | 4.5.0 | 四条患者业务路由和登录入口，受保护页面在导航时核对患者会话 |
+| Element Plus | 2.9.5 | 消息提示及基础组件依赖 |
+| Axios | 1.8.4 | REST 调用；POST SSE 使用 `fetch`，GET 历史回放使用 `EventSource` |
+| lucide-vue-next | 0.468.0 | 图标 |
 
-### 测试
+Node.js 24.x、pnpm 11.x是旧环境/选型记录，当前没有 `.nvmrc`，`package.json`也没有固定 Node/pnpm 的 `engines` / `packageManager`字段，不能宣称工具链已完整锁定。已有 lockfile 仍应保留。
 
-| 层 | 选择 | 基线版本 | 用途 |
-|---|---|---:|---|
-| 单元测试 | JUnit 5 + Mockito | 由 Spring Boot 管理 | AgentRuntime、状态迁移和工具校验 |
-| 集成测试 | Testcontainers | 1.20.6 | 使用真实 MySQL/Redis 容器验证事务和并发 |
-| 等待断言 | Awaitility | 4.2.2 | 验证异步核验和 Redis 租约行为 |
-| 接口测试 | Spring Boot Test + MockMvc | 由 Spring Boot 管理 | REST、鉴权、SSE 入口 |
+## 2. 数据、安全与部署：区分实现和原规划
 
-## 2. Agent 和模型配置
-
-| 配置 | 选择 |
+| 技术或能力 | 当前状态 |
 |---|---|
-| 对话模型 | DeepSeek API，使用 OpenAI 兼容协议 |
-| 默认模型 | 通过环境变量配置，开发环境不把 Key 写入仓库 |
-| API Key | `.env` 或本机环境变量，禁止写入 Git |
-| 工具调用 | LangChain4j 结构化工具调用，后端白名单校验 |
-| 响应传输 | REST 提交用户消息，SSE 推送执行事件和最终回复 |
-| Prompt | 代码管理的版本化模板，首版不做后台任意编辑 |
-| 最大步骤数 | 应用配置限制，默认 8 步 |
-| 工具超时 | 应用配置限制，默认单工具 5 秒 |
+| MySQL | 业务、任务与知识正文的事实来源。8.4 LTS 是原目标版本，历史集成验收使用 8.0.34；本轮未验证任何实例 |
+| Qdrant | 已实现 REST 适配器，[Compose](../../docker-compose.yml)固定 `qdrant/qdrant:v1.13.6`，提供 6333/6334 端口和持久卷；本轮未确认容器运行状态 |
+| Docker Compose | 当前只包含 Qdrant，未提供 MySQL、Redis、前后端统一启动 |
+| Spring Security | 在 `mysql` profile 启用 BCrypt 会话登录与 CSRF 校验。任务与预约由服务端身份检查归属 |
+| JJWT 0.12.6 | 依赖存在，未实现 JWT 登录、签发、验证与刷新流程 |
+| BCrypt 密码登录 | 原方案意图，当前未接入完整密码认证；不能声称演示账号均按生产方式存储密码 |
+| Redis 7.4 | 原目标版本；Starter 与连接配置存在，未接入任务租约、限流或缓存代码；当前业务正确性不依赖 Redis |
+| Lettuce | Spring Data Redis 默认客户端路线；未据此完成任何 Redis 业务功能 |
 
-## 3. RAG 的后置技术栈
+默认配置和组件装配见 [application.yml](../../src/main/resources/application.yml)、[AgentRuntimeConfiguration](../../src/main/java/com/mediflow/agent/config/AgentRuntimeConfiguration.java)、[KnowledgeConfiguration](../../src/main/java/com/mediflow/agent/config/KnowledgeConfiguration.java)。不要从旧机器曾安装服务推断新环境已经就绪。
 
-RAG 不阻塞 P0/P1 预约闭环。进入 P2 后采用：
+## 3. 模型与执行配置
 
-| 层 | 选择 | 说明 |
-|---|---|---|
-| 向量数据库 | Qdrant 1.13.x（实际 1.13.6） | 与 MySQL 业务库职责分离，支持向量检索和 metadata 过滤 |
-| Embedding（默认） | 本地 ONNX `bge-small-zh-v1.5-q`，512 维 | **实际实现的默认**：模型随依赖打包，不需要 Key、不依赖外部服务，测试可离线复跑 |
-| Embedding（可选） | SiliconFlow BGE-M3，1024 维 | 按配置切换；需要**独立的 Embedding Key**，不能复用对话模型的 Key |
-| Rerank | BGE-reranker-v2-m3 | 只在检索质量需要时启用，且必须先有测量 |
-| 文档内容 | 医院预约规则、就诊须知、服务说明 | 不放实时号源和患者隐私 |
+| 配置 | 当前行为 |
+|---|---|
+| 对话模型 | DeepSeek 的 OpenAI 兼容接口，默认 `deepseek-chat`，可用环境变量或外置配置覆盖 |
+| 缺少对话 Key | 使用确定性 `DemoDecisionModel`，用于复现本地业务场景 |
+| 工具 | 向模型声明 `findAvailableSlots`、`getAppointmentRules` 和 `searchHospitalKnowledge` |
+| Prompt | 当前是适配器中的代码字符串，没有在线 Prompt 管理，也不能据此声称完整版本评估系统已实现 |
+| 最大步骤 | `max-steps`默认 8，限制每轮消息处理；任务累计计数不是整任务执行上限 |
+| 限时与重试 | Runner 每次模型/只读工具等待默认 15 秒/5 秒，一轮共享 45 秒，两者的短暂异常最多自动再试一次 |
+| 响应传输 | POST SSE 发送执行进度、已保存文本和本轮结果。GET SSE 回放已存事件 |
+| Key | 通过环境或 Git 忽略的本地外置配置提供；没有实现通用自动加载 `.env`的机制，不在仓库或公开文档记录敏感值 |
 
-Qdrant 在 M3 加入 Docker Compose（`docker-compose.yml` 只放它一个服务；MySQL 与 Redis 仍用本机既有服务，避免两个竞争的业务库）。首版不额外部署 Elasticsearch、Milvus 或 PostgreSQL。
+流式回复和最终结果来自同一次已保存的执行。任务追踪记录各次尝试及其结果，详见[Runtime 架构](agent-runtime-v1.md)。
 
-**Qdrant 客户端直接用 REST API 实现**，没有引入 `langchain4j-qdrant`：该模块是 `EmbeddingStore<TextSegment>` 抽象，会把片段正文写进 payload（与"索引不存正文"冲突），也没有"按版本删除""点数统计""集合生命周期"三个必需能力，并会额外带进 gRPC + guava + netty。以上结论来自 `javap` 核对该模块 API，不是推测。
+## 4. RAG 的当前技术路线
 
-**集合按模型命名**（`{配置名}__{规范化模型名}`）：Qdrant 集合建成后维度不可更改，而不同模型的向量又不可比较，所以让两个模型在结构上无法共用一个集合。
+RAG 已推进到索引与检索底层，不再适用“尚未引入、推迟到 P2”的旧描述。Agent 调用、引用和体验验收仍未接完，见 [M3 实施说明](../product/m3-rag-plan.md)。
 
-**换 Embedding 模型等于换索引**：向量维度由配置声明，两种模型不得混入同一个集合；切换后必须整体重建索引。这一点由 `TextEmbedder` 端口的 `name()` / `dimensions()` 承载，并由 `QdrantKnowledgeIndex` 在集合命名与建维时强制，不是约定而是代码约束。重建用 `scripts/index-knowledge.ps1 -Rebuild`。
+| 层 | 当前实现 |
+|---|---|
+| 资料事实来源 | MySQL 保存版本、发布状态、片段原文与索引状态 |
+| 默认 Embedding | 本地 ONNX `bge-small-zh-v1.5-q`，512 维；模型随依赖打包，运行时不需要调用外部模型服务 |
+| 可选 Embedding | OpenAI 兼容 API 适配器；默认配置指向 SiliconFlow `BAAI/bge-m3`、1024 维，需要独立 Embedding Key；本轮没有验证该服务或模型可用性 |
+| 索引 | 默认 `qdrant`；`memory`供封闭测试/本地核对，`none`用于明确报告不可用 |
+| 检索 | 向量召回候选 id，回读 MySQL 检查当前版本与发布状态，不能把故障当无命中 |
+| 重排/混合检索 | 尚未实现；BGE reranker 是旧候选，不是当前依赖或已选定必须交付项 |
 
-## 4. 关键取舍
+本地 Embedding 不需要模型 API Key，但持久化索引/检索仍需要 MySQL 和 Qdrant。实时号源、患者权限与预约规则不从向量索引取得。
 
-### Spring MVC，不选 WebFlux
+`QdrantKnowledgeIndex`直接使用 Java HTTP 客户端与 REST API，没有引入 `langchain4j-qdrant`。旧选型记录通过核对 0.35.0 模块 API，认为其文本段抽象、集合生命周期等能力与本项目“索引不存正文、按版本删除、可重建”的约束不匹配；该依据只对应当时版本，不能推广成所有版本的结论。
 
-Agent 的模型调用可以异步，但预约写入必须遵守清晰的数据库事务边界。Spring MVC + `SseEmitter` 足够支持首版流式轨迹，代码和调试成本低于全链路响应式模型。
+集合名包含 Embedder 模型标识，维度来自 Embedder；换模型需重建索引。重建入口为 `scripts/index-knowledge.ps1 -Rebuild`，不新增另一份模型与维度真相。
 
-### MyBatis-Plus，不选 JPA
+## 5. 保留的选型理由
 
-`zhixu` 已经使用 MyBatis 体系；预约号源锁定、幂等查询和状态更新需要明确 SQL。MyBatis-Plus 能减少样板代码，同时保留关键事务 SQL 的可见性。
+- **Spring MVC**：现有数据库和事务调用是同步模型，`SseEmitter`可承载事件和回复增量，不必为演示项目引入全链路响应式编程。
+- **MyBatis / JdbcTemplate**：号源行锁、条件更新、幂等和审计需要明确 SQL。实际代码同时使用两者，不把所有访问笼统称为 MyBatis-Plus CRUD。
+- **模块化单体**：Agent、预约、知识和接口保留职责边界，可共享事务基础；目前没有微服务拆分。
+- **MySQL + 可重建向量索引**：业务事实、文档版本与原文保留在关系库，语义索引可独立重建；向量检索不承担库存正确性。
+- **原 Redis 路线选 Lettuce**：现有 Starter 是历史技术基础；已确认将 Redis 租约、缓存与多实例扩展后置，是否启用须由实际需求与验证支撑，预约正确性仍由 MySQL 保障。当前首版范围见[交付计划](../product/delivery-roadmap-v1.md)。
 
-### Lettuce，不选 Redisson
+旧方案没有引入 Spring Cloud、消息队列、Elasticsearch、Redisson、多 Agent 框架、独立认证中心或 Kubernetes。当前代码也没有这些组件；本次整理不增加它们，也不把旧“2—4 周”工期当作新的承诺。
 
-Redis 只做短租约、限流和缓存，首版不需要复杂分布式数据结构。使用 Spring Data Redis 的原子命令可以减少运行时依赖；预约正确性不依赖 Redis 锁。
+## 6. 验证方法与证据限制
 
-### 模块化单体，不选微服务
+| 层次 | 当前证据与入口 |
+|---|---|
+| 核心行为 | JUnit 5/Mockito 与可控模型测试，不依赖真实模型调用 |
+| MySQL 集成 | `scripts/test-mysql.ps1`启动本机 MySQL 可执行程序的隔离实例，并验证本轮报告；不是当前脚本启动 Testcontainers |
+| Qdrant 适配器 | `scripts/test-qdrant.ps1`依赖可达服务，条件启用单独测试 |
+| HTTP | Spring Boot Test / MockMvc；包含会话登录/退出和流式入口归属验证 |
+| 前端 | `vue-tsc`、Vite 构建及真实 Chrome 中的预约流程通过 |
+| Testcontainers 1.20.6 / Awaitility 4.2.2 | 测试依赖已声明，不能据此声称 Redis 容器或租约测试已实现 |
 
-第二个项目的主题是 Agent。模块化单体能保留清晰的领域边界和事务一致性，把时间用于工具编排、确认门禁和运行轨迹。
+2026-10-16 的历史记录报告隔离 MySQL 8.0.34 下 122 项测试执行通过，Qdrant 另有 16 项适配器测试。裸 `mvn test`会跳过条件集成测试，不能以“构建成功”代替全量通过。S1 最新的隔离 MySQL、前端及浏览器证据见[S1 验收](../product/s1-patient-session-acceptance.md)。
 
-### Qdrant 后置，不选 MySQL 向量化
-
-MySQL 负责结构化业务事实；向量检索需要独立能力。RAG 不是首版主线，因此把 Qdrant 推迟到 P2，避免一开始增加无关基础设施。
-
-## 5. 不引入的技术
-
-- Spring Cloud、Nacos、OpenFeign；
-- RabbitMQ、Kafka 等消息队列；
-- Elasticsearch；
-- Redisson；
-- 独立认证中心；
-- 多 Agent 框架；
-- 线上 Prompt 管理平台；
-- Kubernetes。
-
-这些技术并非不能使用，而是当前业务规模和 2 到 4 周首版周期不需要。后续只有在出现明确的扩展需求时才重新评估。
-
-## 6. 版本验证要求
-
-开始编码前必须验证：
-
-1. Java 17、Spring Boot 3.4.5 和 MyBatis-Plus 3.5.9 能正常启动；
-2. LangChain4j 0.35.0 能调用 DeepSeek OpenAI 兼容接口；
-3. MySQL 8.4 的 Flyway 迁移和 JSON 字段可用；
-4. Redis 7.4 的租约、过期和限流命令可用；
-5. Node.js 24、pnpm 11、Vue 3.5.13、Vite 6.2.0 和 TypeScript 5.7.3 能构建；
-6. Testcontainers 能启动 MySQL 和 Redis 并完成一条预约并发测试。
-
-如果某个依赖的补丁版本与本机 Maven/npm 镜像不可用，只允许在同一大版本内调整补丁版本，并在 `docs/architecture/tech-stack-v1.md` 记录实际版本。
+后续若升级依赖或准备复现，应记录实际 JDK/Maven/Node/pnpm 版本，复核数据库迁移、模型适配器、索引维度与前端类型检查。跨大版本升级需要重新验证；不确定的环境与性能数据不得提前写成已通过结论。
