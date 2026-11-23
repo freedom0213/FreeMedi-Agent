@@ -7,6 +7,7 @@ import java.util.Map;
 
 import com.mediflow.agent.agent.ReadToolExecutor;
 import com.mediflow.agent.agent.ReadToolSpec;
+import com.mediflow.agent.agent.ReadToolSpecs;
 import com.mediflow.agent.agent.TaskSnapshot;
 import com.mediflow.agent.agent.ToolCall;
 import com.mediflow.agent.agent.ToolResult;
@@ -21,8 +22,7 @@ public final class MySqlReadToolExecutor implements ReadToolExecutor {
     private static final int DEFAULT_LIMIT = SlotQueryService.DEFAULT_LIMIT;
     private static final int MAX_LIMIT = SlotQueryService.MAX_LIMIT;
     private static final List<ReadToolSpec> TOOLS = List.of(
-            new ReadToolSpec("findAvailableSlots", "更新本轮明确提供的预约条件并查询号源。仅在患者授权时允许放宽对应日期或时段"),
-            new ReadToolSpec("getAppointmentRules", "查询预约系统的技术限制。患者询问医院资料时使用 searchHospitalKnowledge"));
+            ReadToolSpecs.FIND_AVAILABLE_SLOTS, ReadToolSpecs.GET_APPOINTMENT_RULES);
 
     private final SlotQueryService slotQuery;
 

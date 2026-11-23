@@ -66,6 +66,7 @@ export interface AgentTraceEntry {
   durationMs: number | null
   tool: string | null
   resultCount: number | null
+  modelVersion?: string | null
 }
 
 export interface AgentTracePage {
@@ -73,6 +74,69 @@ export interface AgentTracePage {
   entries: AgentTraceEntry[]
   nextAfter: number | null
 }
+
+export interface RegisteredTool {
+  name: string
+  enabled?: boolean
+  timeoutMs?: number | null
+  defaultTimeoutMs?: number
+  revision?: number
+  updatedAt?: string | null
+  updatedBy?: string | null
+  description: string
+  parameters: {
+    name: string
+    type: 'STRING' | 'INTEGER' | 'BOOLEAN'
+    required: boolean
+    description: string
+  }[]
+}
+
+export interface AgentModelConfiguration {
+  mode: 'DEEPSEEK' | 'DEMO' | 'COMPATIBLE' | 'UNKNOWN'
+  active?: ModelRevision | null
+  activatedAt?: string | null
+  environmentBaseUrl?: string | null
+  revision?: number
+  secretStorageReady?: boolean
+  models?: ModelRevision[]
+  callPolicy: {
+    modelTimeoutMs: number
+    toolTimeoutMs: number
+    requestTimeoutMs: number
+    maxAttempts: number
+    retryableReasons: string[]
+  }
+  provider: {
+    modelName: string | null
+    sdkMaxRetries: number
+    maxOutputCorrections: number
+  } | null
+}
+
+export interface ModelRevision {
+  id: number
+  profileId: string
+  revision: number
+  label: string
+  baseUrl: string
+  modelName: string
+  probeCode: string | null
+  probeMs: number | null
+  testedAt: string | null
+}
+
+export interface ModelDraft {
+  profileId: string | null
+  expectedId: number
+  label: string
+  baseUrl: string
+  modelName: string
+  apiKey: string
+}
+
+export type AgentTimeouts = Pick<AgentModelConfiguration['callPolicy'],
+  'modelTimeoutMs' | 'toolTimeoutMs' | 'requestTimeoutMs'>
 
 export interface KnowledgeImportPreview {
   docNo: string
@@ -109,7 +173,7 @@ export function adminLoginTarget(value: unknown) {
   if (typeof value !== 'string' || !value.startsWith('/')) return '/admin'
   try {
     const target = new URL(value, window.location.origin)
-    const adminPath = /^\/admin(?:\/tool-logs|\/knowledge(?:\/import\/preview|\/[^/]+)?)?\/?$/.test(target.pathname)
+    const adminPath = /^\/admin(?:\/tool-logs|\/tool-registry|\/model-config|\/knowledge(?:\/import\/preview|\/[^/]+)?)?\/?$/.test(target.pathname)
     if (target.origin === window.location.origin && adminPath) {
       return target.pathname + target.search + target.hash
     }
@@ -174,6 +238,47 @@ export async function readRecentAgentTasks(signal: AbortSignal) {
   const { data } = await adminHttp.get<AgentTaskSummary[]>('/agent/tasks', { signal })
   return data
 }
+
+export async function readRegisteredTools(signal: AbortSignal) {
+  const { data } = await adminHttp.get<RegisteredTool[]>('/agent/tools', { signal })
+  return data
+}
+
+export async function readAgentModelConfiguration(signal: AbortSignal) {
+  const { data } = await adminHttp.get<AgentModelConfiguration>('/agent/model-config', { signal })
+  return data
+}
+
+async function writeAgentSettings<T>(method: 'post' | 'put', url: string, data: unknown, timeout = 10_000) {
+  const headers = await adminCsrfHeaders()
+  if (!headers) throw new Error('管理员会话已失效，请重新登录。')
+  return (await adminHttp.request<T>({ method, url, data, headers, timeout })).data
+}
+
+export function agentSettingsError(error: unknown) {
+  if (axios.isAxiosError(error)) {
+    const status = error.response?.status
+    if (status === 401 || status === 403) return '管理员会话已失效，请重新登录。'
+    const detail = error.response?.data?.error
+    if (typeof detail === 'string' && /^[\u4e00-\u9fff]/u.test(detail)) return detail
+    if (status === 409) return '配置已更新或尚未通过测试。请重新加载后核对。'
+    if (status === 429) return '已有模型正在测试，请稍后重试。'
+    if (status === 503) return '配置暂不可用，请检查服务端密钥设置后重试。'
+    return '未能确认操作结果，请重新加载核对当前状态。'
+  }
+  return error instanceof Error ? error.message : '操作失败，请稍后重试。'
+}
+
+export const saveAgentModel = (draft: ModelDraft) =>
+  writeAgentSettings<AgentModelConfiguration>('post', '/agent/model-config/models', draft)
+export const testAgentModel = (id: number) =>
+  writeAgentSettings<AgentModelConfiguration>('post', '/agent/model-config/models/' + id + '/test', undefined, 45_000)
+export const activateAgentModel = (id: number | null, expectedRevision: number) =>
+  writeAgentSettings<AgentModelConfiguration>('post', '/agent/model-config/activate', { id, expectedRevision })
+export const updateAgentTimeouts = (timeout: AgentTimeouts, expectedRevision: number) =>
+  writeAgentSettings<AgentModelConfiguration>('put', '/agent/model-config/policy', { ...timeout, expectedRevision })
+export const updateRegisteredTool = (name: string, enabled: boolean, timeoutMs: number | null, expectedRevision: number) =>
+  writeAgentSettings<RegisteredTool[]>('put', '/agent/tools/' + encodeURIComponent(name), { enabled, timeoutMs, expectedRevision })
 
 export async function readAdminAgentTrace(taskId: string, after: number, signal: AbortSignal) {
   const { data } = await adminHttp.get<AgentTracePage>('/agent/tasks/' + encodeURIComponent(taskId) + '/trace', {

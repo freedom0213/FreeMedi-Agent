@@ -28,6 +28,8 @@ const router = createRouter({
         { path: 'knowledge/import/preview', name: 'admin-knowledge-import', component: () => import('./admin/KnowledgeImportPreview.vue') },
         { path: 'knowledge/:docNo', name: 'admin-document', component: () => import('./admin/KnowledgeDetail.vue') },
         { path: 'tool-logs', name: 'admin-tool-logs', component: () => import('./admin/ToolLogs.vue') },
+        { path: 'tool-registry', name: 'admin-tool-registry', component: () => import('./admin/ToolRegistry.vue') },
+        { path: 'model-config', name: 'admin-model-config', component: () => import('./admin/AiModelConfiguration.vue') },
       ],
     },
   ],

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Activity, ChevronRight, Cross, Files, LayoutDashboard, LogOut } from 'lucide-vue-next'
+import { Activity, ChevronRight, Cross, Files, LayoutDashboard, ListTree, LogOut, SlidersHorizontal } from 'lucide-vue-next'
 import { useRoute } from 'vue-router'
 import { adminLogout, adminSession } from '../api/admin'
 import './admin.css'
@@ -9,6 +9,8 @@ const route = useRoute()
 const inKnowledge = computed(() => route.name === 'admin-knowledge' || route.name === 'admin-document'
   || route.name === 'admin-knowledge-import')
 const inToolLogs = computed(() => route.name === 'admin-tool-logs')
+const inToolRegistry = computed(() => route.name === 'admin-tool-registry')
+const inModelConfig = computed(() => route.name === 'admin-model-config')
 const logoutPending = ref(false)
 const logoutError = ref(false)
 
@@ -41,6 +43,12 @@ async function logout() {
         <RouterLink :to="{ name: 'admin-tool-logs' }" :class="{ 'admin-menu-current': inToolLogs }">
           <Activity :size="18" aria-hidden="true" /> 工具调用日志
         </RouterLink>
+        <RouterLink :to="{ name: 'admin-tool-registry' }" :class="{ 'admin-menu-current': inToolRegistry }">
+          <ListTree :size="18" aria-hidden="true" /> 工具注册表
+        </RouterLink>
+        <RouterLink :to="{ name: 'admin-model-config' }" :class="{ 'admin-menu-current': inModelConfig }">
+          <SlidersHorizontal :size="18" aria-hidden="true" /> AI 模型配置
+        </RouterLink>
       </nav>
     </aside>
     <div class="admin-main-container">
@@ -60,6 +68,12 @@ async function logout() {
           </template>
           <template v-if="inToolLogs">
             <ChevronRight :size="14" aria-hidden="true" /><span aria-current="page">工具调用日志</span>
+          </template>
+          <template v-if="inToolRegistry">
+            <ChevronRight :size="14" aria-hidden="true" /><span aria-current="page">工具注册表</span>
+          </template>
+          <template v-if="inModelConfig">
+            <ChevronRight :size="14" aria-hidden="true" /><span aria-current="page">AI 模型配置</span>
           </template>
         </nav>
         <div class="admin-profile">

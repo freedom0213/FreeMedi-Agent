@@ -3,6 +3,7 @@ import { computed, ref, shallowRef, watch, watchEffect } from 'vue'
 import { Activity, RefreshCw, Search } from 'lucide-vue-next'
 import { useRoute, useRouter } from 'vue-router'
 import { adminHttpStatus, readAdminAgentTrace, readRecentAgentTasks, type AgentTaskSummary, type AgentTracePage } from '../api/admin'
+import { toolNames } from './toolLabels'
 
 const route = useRoute()
 const router = useRouter()
@@ -27,9 +28,6 @@ const actionNames: Record<string, string> = {
   CONFIRMATION_CLAIMED: '接收预约确认', CONFIRMATION_REJECTED: '预约确认被拒绝',
   APPOINTMENT_WRITE: '创建预约', APPOINTMENT_VERIFY: '核验预约', APPOINTMENT_LOOKUP: '查询原预约',
 }
-const toolNames: Record<string, string> = {
-  findAvailableSlots: '查询号源', searchHospitalKnowledge: '检索院内资料', getAppointmentRules: '读取预约规则',
-}
 const outcomes: Record<string, string> = {
   SUCCEEDED: '成功', FAILED: '失败', STARTED: '已开始', PENDING: '待核验', UNKNOWN: '结果待确认',
 }
@@ -41,6 +39,7 @@ const statuses: Record<string, string> = {
 const reasons: Record<string, string> = {
   MODEL_TRANSIENT: '模型服务暂时不可用', MODEL_TIMEOUT: '模型调用超时',
   TOOL_TRANSIENT: '工具服务暂时不可用', TOOL_TIMEOUT: '工具调用超时',
+  TOOL_DISABLED: '工具已停用',
   KNOWLEDGE_INDEX_UNAVAILABLE: '资料索引暂不可用', PLAN_EXPIRED: '确认单已过期',
   SLOT_UNAVAILABLE: '号源已不可用', OUTCOME_UNKNOWN: '提交结果待核验', VERIFY_PENDING: '预约核验未完成',
 }
@@ -176,6 +175,7 @@ async function loadMore() {
                 {{ reasons[event.reason] ?? '原因码' }} · <code>{{ event.reason }}</code>
               </span>
               <small v-if="event.resultCount !== null">{{ event.resultCount }} 条结果</small>
+              <small v-if="event.modelVersion">模型版本 {{ event.modelVersion === 'environment' ? '启动配置' : event.modelVersion }}</small>
             </div>
             <div class="admin-trace-event-result">
               <span class="admin-tag" :data-state="event.outcome === 'SUCCEEDED' ? 'INDEXED' : event.outcome === 'FAILED' ? 'FAILED' : 'PENDING'">

@@ -1,7 +1,6 @@
 package com.mediflow.agent.config;
 
 import java.time.Clock;
-import java.time.Duration;
 import java.util.List;
 
 import com.mediflow.agent.agent.AgentRuntime;
@@ -10,15 +9,11 @@ import com.mediflow.agent.agent.AgentCallPolicy;
 import com.mediflow.agent.agent.AppointmentApplicationService;
 import com.mediflow.agent.agent.AppointmentOptions;
 import com.mediflow.agent.agent.CompositeReadToolExecutor;
-import com.mediflow.agent.agent.DecisionModel;
 import com.mediflow.agent.agent.DepartmentCatalog;
 import com.mediflow.agent.agent.ReadToolExecutor;
 import com.mediflow.agent.agent.TaskStateStore;
 import com.mediflow.agent.appointment.MySqlReadToolExecutor;
 import com.mediflow.agent.knowledge.KnowledgeReadToolExecutor;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import dev.langchain4j.model.chat.ChatLanguageModel;
-import dev.langchain4j.model.openai.OpenAiChatModel;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -32,31 +27,6 @@ import java.util.concurrent.Executor;
 @Configuration
 @Profile("mysql")
 public class AgentRuntimeConfiguration {
-    @Bean
-    DecisionModel decisionModel(
-            ObjectMapper objectMapper, Clock agentClock,
-            @Value("${mediflow.llm.api-key:}") String apiKey,
-            @Value("${mediflow.llm.base-url:https://api.deepseek.com/v1}") String baseUrl,
-            @Value("${mediflow.llm.model:deepseek-chat}") String modelName,
-            @Value("${mediflow.agent.model-timeout-ms:15000}") long modelTimeoutMs) {
-        if (apiKey == null || apiKey.isBlank()) {
-            return new DemoDecisionModel();
-        }
-        ChatLanguageModel model = OpenAiChatModel.builder()
-                .apiKey(apiKey)
-                .baseUrl(baseUrl)
-                .modelName(modelName)
-                .temperature(0.1)
-                .maxTokens(1200)
-                .timeout(Duration.ofMillis(modelTimeoutMs))
-                .maxRetries(0)
-                .strictTools(false)
-                .logRequests(false)
-                .logResponses(false)
-                .build();
-        return new DeepSeekDecisionModel(model, objectMapper, agentClock);
-    }
-
     @Bean
     ThreadPoolTaskExecutor agentCallExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
@@ -105,14 +75,14 @@ public class AgentRuntimeConfiguration {
     }
 
     @Bean
-    AgentRuntime agentRuntime(TaskStateStore stateStore, DecisionModel decisionModel,
+    AgentRuntime agentRuntime(TaskStateStore stateStore, AgentSettings settings,
                              ReadToolExecutor toolExecutor,
                              AppointmentApplicationService appointmentService,
                              DepartmentCatalog departmentCatalog,
                              AppointmentOptions appointmentOptions,
-                             Clock agentClock, AgentCallPolicy calls,
+                             Clock agentClock,
                              @Value("${mediflow.agent.max-steps:8}") int maxSteps) {
-        return new AgentRuntimeService(stateStore, decisionModel, toolExecutor,
-                appointmentService, maxSteps, agentClock, departmentCatalog, appointmentOptions, calls);
+        return new AgentRuntimeService(stateStore, toolExecutor,
+                appointmentService, maxSteps, agentClock, departmentCatalog, appointmentOptions, settings::snapshot);
     }
 }

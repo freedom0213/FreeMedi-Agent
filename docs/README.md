@@ -24,7 +24,7 @@
 | [S5 验收](product/s5-booking-recovery.md) | 预约恢复、模型和工具限时、有限重试、任务追踪 | 复验超时、网络中断、刷新、原单核验与真实 DeepSeek 查号 |
 | [S6 验收和本地演示](product/s6-local-acceptance.md) | 真实依赖综合验收、资料维护、Windows 启动、求职演示流程 | 演示前按步骤准备近期号源、资料索引与测试账号 |
 | [管理端院内资料](product/admin-knowledge-management.md) | 本地管理员登录、工作台、版本与片段查看、下架、草稿索引与发布 | 核对患者引用资格、下架影响和发布结果 |
-| [管理端工具调用日志](product/admin-tool-logs.md) | 按任务查看 Agent 追踪、耗时、失败和重试 | 复验预约调用链及管理员接口隔离 |
+| [管理端 Agent 工具与模型配置](product/admin-tool-logs.md) | 按任务查看 Agent 追踪，核对工具参数和生效的模型设置 | 复验预约调用链、管理员权限和运行时设置 |
 | [前端浏览器回归](../web/e2e/README.md) | 两条预约路径、跨页返回、窄屏和失败恢复 | 修改前端后用模拟接口复验 |
 | [产品核查记录](product/project-review-2026-11-17.md) | 日期明确的源码问题、用户约束、整理记录 | 讨论范围的事实依据，不另建排期 |
 | [M3 实现与遗留项](product/m3-rag-plan.md) | 知识导入、索引、检索和 Agent 接入现状 | 保留历史 M3 编号，当前实施与验收统一归入主计划 S3 |

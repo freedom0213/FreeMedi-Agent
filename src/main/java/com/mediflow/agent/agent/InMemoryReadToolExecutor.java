@@ -5,8 +5,7 @@ import java.util.Map;
 
 public final class InMemoryReadToolExecutor implements ReadToolExecutor {
     private final List<ReadToolSpec> tools = List.of(
-            new ReadToolSpec("findAvailableSlots", "查询指定条件下的可用号源"),
-            new ReadToolSpec("getAppointmentRules", "查询预约规则"));
+            ReadToolSpecs.FIND_AVAILABLE_SLOTS, ReadToolSpecs.GET_APPOINTMENT_RULES);
 
     @Override
     public ToolResult execute(ToolCall call, TaskSnapshot task) {

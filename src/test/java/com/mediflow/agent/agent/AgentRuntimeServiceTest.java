@@ -69,6 +69,33 @@ class AgentRuntimeServiceTest {
     }
 
     @Test
+    void modelAndToolsStayOnTheSameSnapshotUntilTheNextRequest() {
+        var calls = new AgentCallPolicy(Runnable::run, 15_000, 5000, 45_000);
+        var current = new java.util.concurrent.atomic.AtomicReference<AgentRequestSettings>();
+        var tool = "getAppointmentRules";
+        DecisionModel nextModel = (context, tools) -> {
+            assertFalse(tools.stream().anyMatch(spec -> spec.name().equals(tool)));
+            return new AgentDecision.CallReadTool(new ToolCall(tool, Map.of()));
+        };
+        var next = new AgentRequestSettings(nextModel, "v2", calls,
+                Map.of(tool, new AgentRequestSettings.ToolPolicy(false, null)));
+        DecisionModel firstModel = (context, tools) -> {
+            assertTrue(tools.stream().anyMatch(spec -> spec.name().equals(tool)));
+            if (!context.toolResults().isEmpty()) return new AgentDecision.Reply("第一版已完成规则查询");
+            current.set(next);
+            return new AgentDecision.CallReadTool(new ToolCall(tool, Map.of()));
+        };
+        current.set(new AgentRequestSettings(firstModel, "v1", calls, Map.of()));
+        var runtime = new AgentRuntimeService(stateStore, new InMemoryReadToolExecutor(), appointmentService, 5,
+                CLOCK, name -> 0L, null, current::get);
+
+        assertEquals("第一版已完成规则查询", runtime.handleMessage(taskId, OWNER, "查询规则").message());
+        var subsequent = runtime.handleMessage(taskId, OWNER, "再次查询规则");
+        assertEquals("这项查询暂不可用，请稍后再试。", subsequent.message());
+        assertFalse(subsequent.status() == TaskStatus.FAILED);
+    }
+
+    @Test
     void conversationCanContinueAfterTransientModelError() {
         java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
         DecisionModel model = (context, tools) -> {

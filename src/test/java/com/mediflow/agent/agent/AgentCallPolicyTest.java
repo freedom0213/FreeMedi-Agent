@@ -69,4 +69,25 @@ class AgentCallPolicyTest {
             worker.shutdownNow();
         }
     }
+
+    @Test
+    void overrideLimitsEachToolAttemptBeforeTheRoundDeadline() {
+        var worker = Executors.newSingleThreadExecutor();
+        var attempts = new ArrayList<AgentCallPolicy.Attempt>();
+        var neverReady = new java.util.concurrent.CountDownLatch(1);
+        try {
+            var policy = new AgentCallPolicy(worker, 5000, 5000, 5000);
+            assertThatThrownBy(() -> policy.run(AgentCallPolicy.Kind.TOOL, policy.deadline(), 100L, () -> {
+                try {
+                    neverReady.await();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                return "late";
+            }, value -> null, (attempt, value) -> attempts.add(attempt))).hasMessage("TOOL_TIMEOUT");
+            assertThat(attempts).extracting(AgentCallPolicy.Attempt::reason).containsExactly("TOOL_TIMEOUT", "TOOL_TIMEOUT");
+        } finally {
+            worker.shutdownNow();
+        }
+    }
 }

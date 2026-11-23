@@ -119,9 +119,10 @@ public final class DemoDecisionModel implements DecisionModel {
         if (message.matches(".*(呼吸困难|持续胸痛|意识不清).*")) {
             return new AgentDecision.Reply("你描述的情况可能需要紧急处理，请立即联系急救或前往急诊。");
         }
-        if (HospitalKnowledgeQuestion.isConsultation(message)
-                && tools.stream().anyMatch(tool -> KnowledgeConsultation.TOOL_NAME.equals(tool.name()))) {
-            return new AgentDecision.CallReadTool(new ToolCall(KnowledgeConsultation.TOOL_NAME, Map.of("query", message)));
+        if (HospitalKnowledgeQuestion.isConsultation(message)) {
+            return tools.stream().anyMatch(tool -> KnowledgeConsultation.TOOL_NAME.equals(tool.name()))
+                    ? new AgentDecision.CallReadTool(new ToolCall(KnowledgeConsultation.TOOL_NAME, Map.of("query", message)))
+                    : new AgentDecision.Reply("医院资料查询暂不可用，你可以向门诊服务台核实。");
         }
         if (message.matches(".*(准备|材料|为什么|理由|规则|怎么去|在哪里|怎么取消).*")
                 && !message.matches(".*(改成|换成|改到|换到|重新查).*")) {

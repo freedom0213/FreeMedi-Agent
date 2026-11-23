@@ -27,6 +27,8 @@ pnpm exec playwright install --no-shell chromium
 - `recovery.spec.ts` 覆盖科室或医生加载、号源查询、预约确认响应丢失、就诊准备页面加载、资料库暂不可用和查询连接中断。
 - `admin-knowledge.spec.ts` 覆盖独立登录、患者会话拒绝、引用与索引状态、下架与失败恢复、Markdown 预览，以及草稿索引重试与确认发布。
 - `admin-tool-logs.spec.ts` 覆盖窄屏任务定位、失败原因、重试、耗时和加载后续记录。
+- `admin-tool-registry.spec.ts` 覆盖窄屏菜单、工具用途、参数、必填项和患者预约确认提示。
+- `admin-model-config.spec.ts` 覆盖模型配置读取失败后重试、生效超时、各层重试策略、演示模式和窄屏布局。
 
 只跑某个测试文件可用 `pnpm test:e2e recovery.spec.ts`。失败时，截图、上下文和浏览器 trace 保存在项目根目录的 `target/frontend-e2e/`。使用 `pnpm exec playwright show-trace <trace.zip 路径>` 查看失败步骤。
 

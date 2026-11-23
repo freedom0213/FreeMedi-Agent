@@ -1,8 +1,10 @@
 package com.mediflow.agent.api;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.mediflow.agent.agent.AgentCallPolicy;
 import com.mediflow.agent.agent.TaskAction;
 import com.mediflow.agent.agent.TaskStatus;
+import com.mediflow.agent.config.AgentSettings;
 import com.mediflow.agent.knowledge.KnowledgeImporter;
 import com.mediflow.agent.knowledge.KnowledgeIndex;
 import com.mediflow.agent.knowledge.KnowledgeIndexFilter;
@@ -12,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.config.AutowireCapableBeanFactory;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -24,13 +27,16 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
+import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
+import java.util.Base64;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -69,16 +75,58 @@ class MySqlAdminKnowledgeTest {
 
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper json;
+    @Autowired AgentCallPolicy agentCalls;
+    @Autowired AgentSettings agentSettings;
+    @Autowired AutowireCapableBeanFactory beanFactory;
     @Autowired JdbcTemplate jdbc;
     @Autowired KnowledgeImporter importer;
     @Autowired KnowledgeIndex index;
     @Autowired KnowledgeIndexer indexer;
     @Autowired KnowledgeRetriever retriever;
     @TempDir Path markdownDirectory;
+    private static final com.sun.net.httpserver.HttpServer MODEL_SERVER = startModelServer();
+
+    private static com.sun.net.httpserver.HttpServer startModelServer() {
+        try {
+            var server = com.sun.net.httpserver.HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            server.createContext("/v1/chat/completions", exchange -> {
+                var mapper = new ObjectMapper();
+                var request = mapper.readTree(exchange.getRequestBody());
+                if (!"Bearer fixture-agent-key".equals(exchange.getRequestHeaders().getFirst("Authorization"))) {
+                    exchange.sendResponseHeaders(401, -1);
+                    exchange.close();
+                    return;
+                }
+                boolean tool = request.path("tool_choice").isObject();
+                Map<String, Object> message = tool ? Map.of("role", "assistant", "tool_calls", java.util.List.of(
+                        Map.of("id", "call_fixture", "type", "function", "function", Map.of("name", "findAvailableSlots",
+                                "arguments", "{\"departmentName\":\"测试科室\"}"))))
+                        : Map.of("role", "assistant", "content", mapper.writeValueAsString(Map.of(
+                                "type", "REPLY", "message", request.path("model").asText())));
+                byte[] response = mapper.writeValueAsBytes(Map.of("id", "completion_fixture", "object", "chat.completion",
+                        "model", request.path("model").asText(), "choices", java.util.List.of(
+                                Map.of("index", 0, "message", message, "finish_reason", tool ? "tool_calls" : "stop"))));
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, response.length);
+                try (var out = exchange.getResponseBody()) { out.write(response); }
+            });
+            server.start();
+            return server;
+        } catch (java.io.IOException error) {
+            throw new IllegalStateException(error);
+        }
+    }
+
+    @org.junit.jupiter.api.AfterAll
+    static void stopModelServer() { MODEL_SERVER.stop(0); }
+
+    private static String modelUrl() { return "http://127.0.0.1:" + MODEL_SERVER.getAddress().getPort() + "/v1"; }
 
     @DynamicPropertySource
     static void mysqlProperties(DynamicPropertyRegistry registry) {
         registry.add("mediflow.llm.api-key", () -> "");
+        registry.add("mediflow.llm.base-url", MySqlAdminKnowledgeTest::modelUrl);
+        registry.add("mediflow.llm.settings-key", () -> Base64.getEncoder().encodeToString(new byte[32]));
         registry.add("spring.datasource.url", () -> System.getProperty("mediflow.test.db.url"));
         registry.add("spring.datasource.username", () -> System.getProperty("mediflow.test.db.username", "root"));
         registry.add("spring.datasource.password", () -> System.getProperty("mediflow.test.db.password", ""));
@@ -416,6 +464,121 @@ class MySqlAdminKnowledgeTest {
         mvc.perform(post(DOCUMENTS + "/" + docNo + "/archive").session(session)
                         .header(token.header(), token.token()).contentType("application/json").content(payload))
                 .andExpect(status().is(expected));
+    }
+
+    @Test
+    void toolRegistryOnlyExposesRegisteredModelToolsToAdmins() throws Exception {
+        String path = "/api/v1/admin/agent/tools";
+        mvc.perform(get(path)).andExpect(status().isUnauthorized());
+        String patient = jdbc.queryForObject("SELECT username FROM sys_user WHERE id = 1001", String.class);
+        var patientSession = signIn(PATIENT_AUTH, patient, "Mediflow-Demo-A!2026", new MockHttpSession(), 204);
+        mvc.perform(get(path).session(patientSession)).andExpect(status().isForbidden());
+        var admin = signIn(ADMIN_AUTH, ADMIN, ADMIN_PASSWORD, new MockHttpSession(), 204);
+        mvc.perform(get(path).session(admin)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(3))
+                .andExpect(jsonPath("$[0].name").value("findAvailableSlots"))
+                .andExpect(jsonPath("$[0].parameters.length()").value(9))
+                .andExpect(jsonPath("$[0].parameters[?(@.required == true)]").isEmpty())
+                .andExpect(jsonPath("$[1].name").value("getAppointmentRules"))
+                .andExpect(jsonPath("$[1].parameters").isEmpty())
+                .andExpect(jsonPath("$[2].name").value("searchHospitalKnowledge"))
+                .andExpect(jsonPath("$[2].parameters[0].name").value("query"))
+                .andExpect(jsonPath("$[2].parameters[0].type").value("STRING"))
+                .andExpect(jsonPath("$[2].parameters[0].required").value(true));
+        var token = csrf(ADMIN_AUTH, admin);
+        mvc.perform(post(path).session(admin).header(token.header(), token.token()))
+                .andExpect(status().isMethodNotAllowed());
+    }
+
+    @Test
+    void reportsTheActiveDemoModelAndCallPolicyToAdministratorsOnly() throws Exception {
+        String path = "/api/v1/admin/agent/model-config";
+        mvc.perform(get(path)).andExpect(status().isUnauthorized());
+        String patient = jdbc.queryForObject("SELECT username FROM sys_user WHERE id = 1001", String.class);
+        var patientSession = signIn(PATIENT_AUTH, patient, "Mediflow-Demo-A!2026", new MockHttpSession(), 204);
+        mvc.perform(get(path).session(patientSession)).andExpect(status().isForbidden());
+        var admin = signIn(ADMIN_AUTH, ADMIN, ADMIN_PASSWORD, new MockHttpSession(), 204);
+        var response = mvc.perform(get(path).session(admin)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.mode").value("DEMO"))
+                .andExpect(jsonPath("$.provider").doesNotExist()).andReturn();
+        var body = json.readTree(response.getResponse().getContentAsString());
+        assertThat(json.treeToValue(body.get("callPolicy"), AgentCallPolicy.Settings.class))
+            .isEqualTo(agentCalls.settings());
+        assertThat(body.has("apiKey")).isFalse();
+        var token = csrf(ADMIN_AUTH, admin);
+        mvc.perform(post(path).session(admin).header(token.header(), token.token()))
+                .andExpect(status().isMethodNotAllowed());
+    }
+
+    @Test
+    void managesTestedModelRevisionsAndToolPolicyAcrossRuntimeReload() throws Exception {
+        String models = "/api/v1/admin/agent/model-config";
+        String tools = "/api/v1/admin/agent/tools/findAvailableSlots";
+        var admin = signIn(ADMIN_AUTH, ADMIN, ADMIN_PASSWORD, new MockHttpSession(), 204);
+        var token = csrf(ADMIN_AUTH, admin);
+        var patient = signIn(PATIENT_AUTH, "demo-patient", "Mediflow-Demo-A!2026", new MockHttpSession(), 204);
+        var patientToken = csrf(PATIENT_AUTH, patient);
+        String setting = "{\"enabled\":false,\"timeoutMs\":1400,\"expectedRevision\":0}";
+        mvc.perform(put(tools).session(admin).contentType("application/json").content(setting))
+                .andExpect(status().isForbidden());
+        mvc.perform(put(tools).session(patient).header(patientToken.header(), patientToken.token())
+                        .contentType("application/json").content(setting)).andExpect(status().isForbidden());
+
+        var initial = agentSettings.modelView();
+        var originalSnapshot = agentSettings.snapshot();
+        String profileId = null;
+        try {
+            String draft = json.writeValueAsString(Map.of("expectedId", 0, "label", "测试模型", "baseUrl", modelUrl(),
+                    "modelName", "fixture-one", "apiKey", "fixture-agent-key"));
+            var saved = mvc.perform(post(models + "/models").session(admin).header(token.header(), token.token())
+                            .contentType("application/json").content(draft)).andExpect(status().isOk())
+                    .andExpect(jsonPath("$.mode").value("DEMO")).andReturn().getResponse().getContentAsString();
+            assertThat(saved).doesNotContain("fixture-agent-key", "encryptedKey");
+            var first = agentSettings.modelView().models().get(0);
+            profileId = first.profileId();
+            var encrypted = jdbc.queryForObject("SELECT encrypted_key FROM agent_model_revision WHERE id = ?", byte[].class, first.id());
+            assertThat(new String(encrypted, StandardCharsets.UTF_8)).doesNotContain("fixture-agent-key");
+            String activation = json.writeValueAsString(Map.of("id", first.id(), "expectedRevision", initial.revision()));
+            mvc.perform(post(models + "/activate").session(admin).header(token.header(), token.token())
+                            .contentType("application/json").content(activation)).andExpect(status().isConflict());
+            mvc.perform(post(models + "/models/" + first.id() + "/test").session(admin).header(token.header(), token.token()))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.models[0].probeCode").value("PASSED"));
+            mvc.perform(post(models + "/activate").session(admin).header(token.header(), token.token())
+                            .contentType("application/json").content(activation))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.active.modelName").value("fixture-one"));
+
+            var created = mvc.perform(post("/api/v1/tasks").session(patient).header(patientToken.header(), patientToken.token()))
+                    .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
+            String task = "/api/v1/tasks/" + json.readTree(created).get("taskId").asText();
+            mvc.perform(post(task + "/messages").session(patient).header(patientToken.header(), patientToken.token())
+                            .contentType("application/json").content("{\"message\":\"测试新模型\",\"clientRequestId\":\"agent-settings-fixture\"}"))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.message").value("fixture-one"));
+            mvc.perform(put(tools).session(admin).header(token.header(), token.token())
+                            .contentType("application/json").content(setting))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$[0].enabled").value(false));
+            mvc.perform(put(tools).session(admin).header(token.header(), token.token())
+                            .contentType("application/json").content(setting)).andExpect(status().isConflict());
+            mvc.perform(post(task + "/requirements").session(patient).header(patientToken.header(), patientToken.token())
+                            .contentType("application/json").content("{}"))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.message").value("暂时无法查询号源，已保留原预约条件，请稍后再试。"));
+            var reloaded = beanFactory.createBean(AgentSettings.class);
+            assertThat(reloaded.snapshot().modelVersion()).isEqualTo(first.profileId() + "/v1");
+            assertThat(reloaded.snapshot().toolEnabled("findAvailableSlots")).isFalse();
+            assertThat(reloaded.snapshot().toolTimeout("findAvailableSlots")).isEqualTo(1400L);
+            assertThat(originalSnapshot.toolEnabled("findAvailableSlots")).isTrue();
+            assertThat(originalSnapshot.modelVersion()).isEqualTo("environment");
+
+            agentSettings.saveModel(profileId, first.id(), "测试模型", modelUrl(), "fixture-two", null, Long.parseLong(
+                    jdbc.queryForObject("SELECT id FROM sys_user WHERE username = ?", String.class, ADMIN)));
+            assertThat(agentSettings.modelView().active().id()).isEqualTo(first.id());
+            assertThat(agentSettings.modelView().models().get(0).probeCode()).isNull();
+        } finally {
+            long adminId = jdbc.queryForObject("SELECT id FROM sys_user WHERE username = ?", Long.class, ADMIN);
+            agentSettings.activate(null, agentSettings.modelView().revision(), adminId);
+            var tool = agentSettings.toolView().get(0);
+            agentSettings.updateTool(tool.name(), true, null, tool.revision(), adminId);
+            if (profileId != null) jdbc.update("DELETE FROM agent_model_revision WHERE profile_id = ?", profileId);
+        }
     }
 
     private MockHttpSession signIn(String endpoint, String username, String password, MockHttpSession session,

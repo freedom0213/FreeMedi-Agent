@@ -32,10 +32,13 @@ import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatLanguageModel;
+import dev.langchain4j.model.openai.OpenAiChatModel;
 import dev.ai4j.openai4j.OpenAiHttpException;
 
 /** Maps DeepSeek tool calls and constrained JSON decisions into the AgentRuntime protocol. */
 public final class DeepSeekDecisionModel implements DecisionModel {
+    static final int SDK_MAX_RETRIES = 0;
+    private static final int MAX_DECISION_ATTEMPTS = 2;
     private static final String SYSTEM_PROMPT = """
             你是 FreeMedi 医院的导诊与预约助手。只能根据用户消息、任务状态和工具结果提出下一步决策。
             只可调用提供的只读工具；不得声称已经预约成功，不得执行或要求执行写操作。
@@ -77,11 +80,18 @@ public final class DeepSeekDecisionModel implements DecisionModel {
         this.clock = clock;
     }
 
+    public ProviderSettings providerSettings() {
+        String name = model instanceof OpenAiChatModel client ? client.modelName() : null;
+        return new ProviderSettings(name, SDK_MAX_RETRIES, MAX_DECISION_ATTEMPTS - 1);
+    }
+
+    public record ProviderSettings(String modelName, int sdkMaxRetries, int maxOutputCorrections) { }
+
     @Override
     public AgentDecision decide(DecisionContext context, List<ReadToolSpec> tools) {
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(SystemMessage.from(SYSTEM_PROMPT + "\n当前日期（北京时间）："
-                + LocalDate.now(clock.withZone(ZoneId.of("Asia/Shanghai")))));
+                + LocalDate.now(clock.withZone(ZoneId.of("Asia/Shanghai"))) + unavailableToolsNotice(tools)));
         context.task().turns().stream()
                 .filter(turn -> turn.assistantMessage() != null)
                 .forEach(turn -> {
@@ -118,7 +128,7 @@ public final class DeepSeekDecisionModel implements DecisionModel {
                 ? toolSpecifications.stream().filter(tool -> tool.name().equals(KnowledgeConsultation.TOOL_NAME))
                         .findFirst().orElse(null) : null;
         ToolSpecification requiredTool = profileTool;
-        for (int attempt = 0; attempt < 2; attempt++) {
+        for (int attempt = 1; attempt <= MAX_DECISION_ATTEMPTS; attempt++) {
             dev.langchain4j.model.output.Response<AiMessage> response;
             try {
                 response = requiredTool == null ? model.generate(messages, toolSpecifications)
@@ -155,14 +165,15 @@ public final class DeepSeekDecisionModel implements DecisionModel {
                 }
                 if (profileTool != null) throw new ModelDecisionException(INVALID_TOOL_REQUEST);
                 AgentDecision decision = parseDecision(aiMessage.text(), context);
-                if (!triageOnly && blocksExplicitNearestRequest(decision, context)) {
+                if (toolSpecifications.stream().anyMatch(tool -> tool.name().equals("findAvailableSlots"))
+                        && blocksExplicitNearestRequest(decision, context)) {
                     throw new ModelDecisionException(OPTIONAL_PREFERENCE_QUESTION);
                 }
                 return decision;
             } catch (RuntimeException exception) {
                 ModelDecisionException failure = exception instanceof ModelDecisionException decisionException
                         ? decisionException : new ModelDecisionException(INVALID_DECISION);
-                if (attempt == 1) throw failure;
+                if (attempt == MAX_DECISION_ATTEMPTS) throw failure;
                 if (failure.reason() == OPTIONAL_PREFERENCE_QUESTION) {
                     requiredTool = toolSpecifications.stream().filter(tool -> tool.name().equals("findAvailableSlots"))
                             .findFirst().orElse(null);
@@ -195,39 +206,31 @@ public final class DeepSeekDecisionModel implements DecisionModel {
     }
 
     private List<ToolSpecification> specifications(List<ReadToolSpec> tools) {
-        List<ToolSpecification> result = new ArrayList<>();
-        for (ReadToolSpec tool : tools) {
-            if ("findAvailableSlots".equals(tool.name())) {
-                result.add(ToolSpecification.builder().name(tool.name()).description(tool.description())
-                        .addOptionalParameter("departmentId", JsonSchemaProperty.INTEGER,
-                                JsonSchemaProperty.description("科室 ID"))
-                        .addOptionalParameter("departmentName", JsonSchemaProperty.STRING,
-                                JsonSchemaProperty.description("用户提供的科室名称或科室代码"))
-                        .addOptionalParameter("doctorId", JsonSchemaProperty.INTEGER,
-                                JsonSchemaProperty.description("医生 ID"))
-                        .addOptionalParameter("doctorName", JsonSchemaProperty.STRING,
-                                JsonSchemaProperty.description("用户提供的医生姓名"))
-                        .addOptionalParameter("appointmentDate", JsonSchemaProperty.STRING,
-                                JsonSchemaProperty.description("预约日期，支持明天、周六或 yyyy-MM-dd。清除日期时传空字符串"))
-                        .addOptionalParameter("clinicPeriod", JsonSchemaProperty.STRING,
-                                JsonSchemaProperty.description("MORNING、AFTERNOON 或 EVENING。清除时段时传空字符串"))
-                        .addOptionalParameter("dateFlexible", JsonSchemaProperty.BOOLEAN,
-                                JsonSchemaProperty.description("患者明确授权时才允许改日期"))
-                        .addOptionalParameter("periodFlexible", JsonSchemaProperty.BOOLEAN,
-                                JsonSchemaProperty.description("患者明确授权时才允许改时段"))
-                        .addOptionalParameter("limit", JsonSchemaProperty.INTEGER,
-                                JsonSchemaProperty.description("最多返回数量，不超过 50"))
-                        .build());
-            } else if ("getAppointmentRules".equals(tool.name())) {
-                result.add(ToolSpecification.builder().name(tool.name()).description(tool.description()).build());
-            } else if (KnowledgeConsultation.TOOL_NAME.equals(tool.name())) {
-                result.add(ToolSpecification.builder().name(tool.name()).description(tool.description())
-                        .addParameter("query", JsonSchemaProperty.STRING,
-                                JsonSchemaProperty.description("患者本轮提出的资料问题，保留需要核实的细节"))
-                        .build());
-            }
+        return tools.stream().map(DeepSeekDecisionModel::specification).toList();
+    }
+
+    private static String unavailableToolsNotice(List<ReadToolSpec> tools) {
+        var available = tools.stream().map(ReadToolSpec::name).collect(java.util.stream.Collectors.toSet());
+        var paused = List.of("findAvailableSlots", "getAppointmentRules", KnowledgeConsultation.TOOL_NAME).stream()
+                .filter(name -> !available.contains(name)).toList();
+        return paused.isEmpty() ? "" : "\n本轮暂不可用的工具：" + String.join("、", paused)
+                + "。如果患者需要该工具才能完成的查询，用 REPLY 告知对应查询暂不可用。"
+                + "仍须优先处理急症提示，继续遵循原有分诊和预约确认约束。";
+    }
+
+    static ToolSpecification specification(ReadToolSpec tool) {
+        var builder = ToolSpecification.builder().name(tool.name()).description(tool.description());
+        for (var parameter : tool.parameters()) {
+            var type = switch (parameter.type()) {
+                case STRING -> JsonSchemaProperty.STRING;
+                case INTEGER -> JsonSchemaProperty.INTEGER;
+                case BOOLEAN -> JsonSchemaProperty.BOOLEAN;
+            };
+            var description = JsonSchemaProperty.description(parameter.description());
+            if (parameter.required()) builder.addParameter(parameter.name(), type, description);
+            else builder.addOptionalParameter(parameter.name(), type, description);
         }
-        return List.copyOf(result);
+        return builder.build();
     }
 
     private AgentDecision parseDecision(String content, DecisionContext context) {

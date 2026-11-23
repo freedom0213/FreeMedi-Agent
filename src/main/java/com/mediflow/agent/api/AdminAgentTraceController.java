@@ -61,10 +61,13 @@ public class AdminAgentTraceController {
         boolean readAttempt = "READ_TOOL_ATTEMPT".equals(row.type());
         String tool = readAttempt && proposedTool instanceof String name && tools.contains(name) ? name : null;
         var count = action.summary().get("resultCount");
+        var version = action.summary().get("modelVersion");
         return new AdminTraceEntry(row.sequence(), row.recordedAt(), row.type(), action.turnNo(),
                 action.stepNo(), action.attempt(), action.outcome(), safeCode(row.reason()),
                 TIMED_ACTIONS.contains(row.type()) ? action.durationMs() : null, tool,
-                readAttempt && count instanceof Number number ? number.intValue() : null);
+                readAttempt && count instanceof Number number ? number.intValue() : null,
+                "MODEL_DECISION".equals(row.type()) && version instanceof String value
+                        && value.matches("[a-z0-9/-]{1,64}") ? value : null);
     }
 
     private static String safeCode(String reason) {
@@ -75,5 +78,5 @@ public class AdminAgentTraceController {
 
     public record AdminTraceEntry(long sequence, Instant recordedAt, String type, int turnNo, int stepNo,
                                   int attempt, String outcome, String reason, Long durationMs,
-                                  String tool, Integer resultCount) {}
+                                  String tool, Integer resultCount, String modelVersion) {}
 }

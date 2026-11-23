@@ -17,6 +17,7 @@ import com.mediflow.agent.agent.DecisionContext;
 import com.mediflow.agent.agent.PlanDraft;
 import com.mediflow.agent.agent.Principal;
 import com.mediflow.agent.agent.ReadToolSpec;
+import com.mediflow.agent.agent.ReadToolSpecs;
 import com.mediflow.agent.agent.TaskContext;
 import com.mediflow.agent.agent.TaskId;
 import com.mediflow.agent.agent.TaskStatus;
@@ -35,8 +36,7 @@ class DeepSeekDecisionModelTest {
     private final ChatLanguageModel chatModel = mock(ChatLanguageModel.class);
     private final DeepSeekDecisionModel model = new DeepSeekDecisionModel(chatModel, new ObjectMapper());
     private final List<ReadToolSpec> tools = List.of(
-            new ReadToolSpec("findAvailableSlots", "查询可用号源"),
-            new ReadToolSpec("getAppointmentRules", "查询预约规则"));
+            ReadToolSpecs.FIND_AVAILABLE_SLOTS, ReadToolSpecs.GET_APPOINTMENT_RULES);
 
     @Test
     void asksAboutTriageDirectionWithoutOfferingSlotSearch() {
@@ -71,12 +71,40 @@ class DeepSeekDecisionModelTest {
                 .arguments("{\"query\":\"就诊要带什么证件？\"}").build();
         when(chatModel.generate(anyList(), anyList())).thenReturn(Response.from(AiMessage.from(request)));
 
-        var decision = model.decide(context("就诊要带什么证件？"), List.of(new ReadToolSpec(name, "查阅医院资料")));
+        var decision = model.decide(context("就诊要带什么证件？"), List.of(ReadToolSpecs.SEARCH_HOSPITAL_KNOWLEDGE));
 
         assertThat(decision).isEqualTo(new AgentDecision.CallReadTool(new ToolCall(name, Map.of("query", "就诊要带什么证件？"))));
         verify(chatModel).generate(anyList(), org.mockito.ArgumentMatchers.<List<ToolSpecification>>argThat(specs ->
                 specs.size() == 1 && specs.get(0).name().equals(name)
-                        && specs.get(0).parameters().properties().containsKey("query")));
+                        && specs.get(0).parameters().properties().containsKey("query")
+                        && specs.get(0).parameters().required().equals(List.of("query"))));
+    }
+
+    @Test
+    void modelSchemaPreservesEveryRegisteredParameterTypeAndRequiredFlag() {
+        List<ReadToolSpec> registered = List.of(ReadToolSpecs.FIND_AVAILABLE_SLOTS,
+                ReadToolSpecs.GET_APPOINTMENT_RULES, ReadToolSpecs.SEARCH_HOSPITAL_KNOWLEDGE);
+        when(chatModel.generate(anyList(), anyList())).thenReturn(Response.from(
+                AiMessage.from("{\"type\":\"REPLY\",\"message\":\"好的。\"}")));
+        model.decide(context("你好"), registered);
+
+        verify(chatModel).generate(anyList(), org.mockito.ArgumentMatchers.<List<ToolSpecification>>argThat(specs -> {
+            assertThat(specs).extracting(ToolSpecification::name)
+                    .containsExactly("findAvailableSlots", "getAppointmentRules", "searchHospitalKnowledge");
+            var slots = specs.get(0).parameters();
+            assertThat(slots.properties()).containsOnlyKeys("departmentId", "departmentName", "doctorId", "doctorName",
+                    "appointmentDate", "clinicPeriod", "dateFlexible", "periodFlexible", "limit");
+            assertThat(slots.properties().get("departmentId")).containsEntry("type", "integer");
+            assertThat(slots.properties().get("appointmentDate")).containsEntry("type", "string");
+            assertThat(slots.properties().get("periodFlexible")).containsEntry("type", "boolean");
+            assertThat(slots.required()).isNullOrEmpty();
+            assertThat(specs.get(1).parameters()).isNull();
+            var knowledge = specs.get(2).parameters();
+            assertThat(knowledge.properties()).containsOnlyKeys("query");
+            assertThat(knowledge.properties().get("query")).containsEntry("type", "string");
+            assertThat(knowledge.required()).containsExactly("query");
+            return true;
+        }));
     }
 
     @Test

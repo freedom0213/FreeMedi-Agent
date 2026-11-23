@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,14 +16,19 @@ public final class AgentRuntimeService implements AgentRuntime {
     private static final Logger logger = LoggerFactory.getLogger(AgentRuntimeService.class);
 
     private final TaskStateStore stateStore;
-    private final DecisionModel decisionModel;
     private final ReadToolExecutor toolExecutor;
     private final AppointmentApplicationService appointmentService;
     private final int maxSteps;
     private final Clock clock;
     private final DepartmentCatalog departmentCatalog;
     private final AppointmentOptions appointmentOptions;
-    private final AgentCallPolicy calls;
+    private final Supplier<AgentRequestSettings> settings;
+
+    private record Request(AgentRequestSettings settings, long deadline) {
+        Request(AgentRequestSettings settings) {
+            this(settings, settings.calls().deadline());
+        }
+    }
 
     public AgentRuntimeService(TaskStateStore stateStore,
                                DecisionModel decisionModel,
@@ -54,18 +60,25 @@ public final class AgentRuntimeService implements AgentRuntime {
                                AppointmentApplicationService appointmentService, int maxSteps, Clock clock,
                                DepartmentCatalog departmentCatalog, AppointmentOptions appointmentOptions,
                                AgentCallPolicy calls) {
+        this(stateStore, toolExecutor, appointmentService, maxSteps, clock, departmentCatalog, appointmentOptions,
+                () -> new AgentRequestSettings(decisionModel, "built-in", calls, Map.of()));
+    }
+
+    public AgentRuntimeService(TaskStateStore stateStore, ReadToolExecutor toolExecutor,
+                               AppointmentApplicationService appointmentService, int maxSteps, Clock clock,
+                               DepartmentCatalog departmentCatalog, AppointmentOptions appointmentOptions,
+                               Supplier<AgentRequestSettings> settings) {
         if (maxSteps <= 0) {
             throw new IllegalArgumentException("max steps must be positive");
         }
         this.stateStore = stateStore;
-        this.decisionModel = decisionModel;
         this.toolExecutor = toolExecutor;
         this.appointmentService = appointmentService;
         this.maxSteps = maxSteps;
         this.clock = clock;
         this.departmentCatalog = departmentCatalog;
         this.appointmentOptions = appointmentOptions;
-        this.calls = calls;
+        this.settings = settings;
     }
 
     @Override
@@ -104,19 +117,20 @@ public final class AgentRuntimeService implements AgentRuntime {
                         List.of(new AgentEvent(ready ? "MESSAGE_REPLAYED" : "MESSAGE_IN_PROGRESS", reply)), context.snapshot());
             }
         }
+        var request = new Request(settings.get());
+        var decisionModel = request.settings().model();
         context.beginTurn(message, appointmentOptions != null,
                 clientRequestId == null ? UUID.randomUUID().toString() : clientRequestId);
         if (appointmentOptions == null) context.setRecommendation(null);
         context.trace("TURN_STARTED", 1, "STARTED", null, 0, Map.of());
         stateStore.save(context);
 
-        long deadline = calls.deadline();
         List<AgentEvent> events = new ArrayList<>();
         List<ToolResult> toolResults = new ArrayList<>();
         events.add(new AgentEvent("TASK_STARTED", "开始处理用户消息"));
 
         if (context.snapshot().taskType() == TaskType.VISIT_CONSULTATION) {
-            return answerVisitConsultation(context, message, events, progress, deadline);
+            return answerVisitConsultation(context, message, events, progress, request);
         }
 
         for (int i = 0; i < maxSteps; i++) {
@@ -124,11 +138,14 @@ public final class AgentRuntimeService implements AgentRuntime {
             AgentDecision decision;
             try {
                 var input = new DecisionContext(context.snapshot(), message, List.copyOf(toolResults), appointmentOptions != null);
-                decision = calls.run(AgentCallPolicy.Kind.MODEL, deadline,
-                        () -> decisionModel.decide(input, toolExecutor.tools()),
+                var availableTools = toolExecutor.tools().stream()
+                        .filter(tool -> request.settings().toolEnabled(tool.name())).toList();
+                decision = request.settings().calls().run(AgentCallPolicy.Kind.MODEL, request.deadline(),
+                        () -> decisionModel.decide(input, availableTools),
                         answer -> answer == null ? "MODEL_EMPTY_RESULT" : null,
                         (attempt, answer) -> traceAttempt(context, "MODEL_DECISION", attempt, Map.of(
                                 "adapter", decisionModel.getClass().getSimpleName(),
+                                "modelVersion", request.settings().modelVersion(),
                                 "decision", answer == null ? "" : answer.getClass().getSimpleName())));
             } catch (AgentCallPolicy.Failure failure) {
                 logger.warn("Agent decision failed: taskId={}, reason={}", taskId.value(), failure.code());
@@ -150,10 +167,14 @@ public final class AgentRuntimeService implements AgentRuntime {
             if (decision instanceof AgentDecision.CallReadTool callReadTool) {
                 ToolCall call = callReadTool.call();
                 if (KnowledgeConsultation.TOOL_NAME.equals(call.name())) {
-                    return consultKnowledge(context, events, call, progress, deadline);
+                    return consultKnowledge(context, events, call, progress, request);
                 }
                 if (appointmentOptions != null && call.name().equals("findAvailableSlots")) {
-                    return searchFromConversation(context, events, authorisedFlexibility(call, message), progress, deadline);
+                    return searchOptions(context, events, authorisedFlexibility(call, message), progress, request, "CONVERSATION");
+                }
+                if (!request.settings().toolEnabled(call.name())) {
+                    traceTool(context, call, new AgentCallPolicy.Attempt(1, 0, "TOOL_DISABLED"), "CONVERSATION", null);
+                    return result("这项查询暂不可用，请稍后再试。", context, events);
                 }
                 if (!preserveOptions(context) && context.snapshot().status() != TaskStatus.SEARCHING) {
                     context.transitionTo(TaskStatus.SEARCHING);
@@ -164,7 +185,7 @@ public final class AgentRuntimeService implements AgentRuntime {
                 int callNo = context.startTool(call);
                 stateStore.save(context);
                 long started = System.nanoTime();
-                ToolResult toolResult = executeReadTool(context, call, deadline);
+                ToolResult toolResult = executeReadTool(context, call, request);
                 toolResults.add(toolResult);
                 context.finishTool(callNo, call, toolResult, AgentCallPolicy.elapsed(started));
                 if (preserveOptions(context)) context.setLastToolResult(originalToolResult);
@@ -237,7 +258,7 @@ public final class AgentRuntimeService implements AgentRuntime {
     }
 
     private AgentTurnResult answerVisitConsultation(TaskContext context, String question, List<AgentEvent> events,
-                                                     Consumer<AgentEvent> progress, long deadline) {
+                                                     Consumer<AgentEvent> progress, Request request) {
         if (question.matches("(?s).*(再约|重新预约|重新挂号|另约|再挂|确认预约|改成|换成|改到|换到|重选号源|帮我取消).*")) {
             return result("这里可以查询本次预约和就诊准备。要办理另一笔预约，请从挂号入口开始。", context, events);
         }
@@ -250,11 +271,11 @@ public final class AgentRuntimeService implements AgentRuntime {
                     appointment.get("doctorName"), appointment.get("appointmentNo")), context, events);
         }
         return consultKnowledge(context, events,
-                new ToolCall(KnowledgeConsultation.TOOL_NAME, Map.of("query", question)), progress, deadline);
+                new ToolCall(KnowledgeConsultation.TOOL_NAME, Map.of("query", question)), progress, request);
     }
 
     private AgentTurnResult consultKnowledge(TaskContext context, List<AgentEvent> events, ToolCall call,
-                                              Consumer<AgentEvent> progress, long deadline) {
+                                              Consumer<AgentEvent> progress, Request request) {
         AgentEvent start = new AgentEvent("READ_TOOL_STARTED", call.name());
         events.add(start);
         progress.accept(start);
@@ -262,7 +283,7 @@ public final class AgentRuntimeService implements AgentRuntime {
         ToolResult previous = context.snapshot().lastToolResult().orElse(null);
         stateStore.save(context);
         long startedAt = System.nanoTime();
-        ToolResult toolResult = executeReadTool(context, call, deadline);
+        ToolResult toolResult = executeReadTool(context, call, request);
         context.finishTool(number, call, toolResult, AgentCallPolicy.elapsed(startedAt));
         context.setLastToolResult(previous);
         KnowledgeConsultation consultation = KnowledgeConsultation.from(toolResult);
@@ -288,7 +309,7 @@ public final class AgentRuntimeService implements AgentRuntime {
             throw new IllegalArgumentException("这次任务已结束或正在提交，请新建预约需求。");
         }
         return searchOptions(context, new ArrayList<>(), new ToolCall("findAvailableSlots", changes),
-                event -> { }, calls.deadline(), "PAGE");
+                event -> { }, new Request(settings.get()), "PAGE");
     }
 
     @Override
@@ -324,13 +345,8 @@ public final class AgentRuntimeService implements AgentRuntime {
                         new AgentEvent("CONFIRMATION_REQUIRED", plan.id().value())), context.snapshot());
     }
 
-    private AgentTurnResult searchFromConversation(TaskContext context, List<AgentEvent> events, ToolCall call,
-                                                   Consumer<AgentEvent> progress, long deadline) {
-        return searchOptions(context, events, call, progress, deadline, "CONVERSATION");
-    }
-
     private AgentTurnResult searchOptions(TaskContext context, List<AgentEvent> events, ToolCall call,
-                                         Consumer<AgentEvent> progress, long deadline, String source) {
+                                         Consumer<AgentEvent> progress, Request request, String source) {
         boolean conversation = source.equals("CONVERSATION");
         AgentEvent started = new AgentEvent("READ_TOOL_STARTED", call.name());
         events.add(started);
@@ -340,8 +356,13 @@ public final class AgentRuntimeService implements AgentRuntime {
         String message;
         ToolResult toolResult;
         try {
+            if (!request.settings().toolEnabled(call.name())) {
+                traceTool(context, call, new AgentCallPolicy.Attempt(1, 0, "TOOL_DISABLED"), source, null);
+                throw AgentCallPolicy.Failure.disabledTool();
+            }
             var saved = facts(context, "requirements");
-            var search = calls.run(AgentCallPolicy.Kind.TOOL, deadline,
+            var search = request.settings().calls().run(AgentCallPolicy.Kind.TOOL, request.deadline(),
+                    request.settings().toolTimeout(call.name()),
                     () -> appointmentOptions.search(saved, call.arguments(), source),
                     value -> value == null ? "TOOL_EMPTY_RESULT" : null,
                     (attempt, value) -> traceTool(context, call, attempt, source,
@@ -378,10 +399,15 @@ public final class AgentRuntimeService implements AgentRuntime {
         return new AgentTurnResult(message, context.snapshot().status(), events, context.snapshot());
     }
 
-    private ToolResult executeReadTool(TaskContext context, ToolCall call, long deadline) {
+    private ToolResult executeReadTool(TaskContext context, ToolCall call, Request request) {
+        if (!request.settings().toolEnabled(call.name())) {
+            traceTool(context, call, new AgentCallPolicy.Attempt(1, 0, "TOOL_DISABLED"), "CONVERSATION", null);
+            return ToolResult.failure("TOOL_DISABLED", "这项查询暂不可用，请稍后再试。");
+        }
         TaskSnapshot input = context.snapshot();
         try {
-            return calls.run(AgentCallPolicy.Kind.TOOL, deadline, () -> toolExecutor.execute(call, input),
+            return request.settings().calls().run(AgentCallPolicy.Kind.TOOL, request.deadline(),
+                    request.settings().toolTimeout(call.name()), () -> toolExecutor.execute(call, input),
                     value -> value == null ? "EMPTY_TOOL_RESULT" : value.errorCode(),
                     (attempt, value) -> traceTool(context, call, attempt, "CONVERSATION",
                             value != null && value.data().get("count") instanceof Number count ? count : null));
