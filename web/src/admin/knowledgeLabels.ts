@@ -27,3 +27,8 @@ const hospitalDate = new Intl.DateTimeFormat('zh-CN', {
 export function publishedTime(value: string | null) {
   return value ? hospitalDate.format(new Date(value)) : '尚未发布'
 }
+
+export function knowledgeFragmentLink(chunk: { docNo: string; version: number; chunkNo: number | null }) {
+  return { name: 'admin-document', params: { docNo: chunk.docNo },
+    query: { version: chunk.version, chunk: chunk.chunkNo ?? undefined } }
+}

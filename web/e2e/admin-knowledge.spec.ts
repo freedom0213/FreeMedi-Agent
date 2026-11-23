@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
+import { emptyWorkbenchResponse } from './admin-workbench-fixture'
 import type { DocumentDetail, DocumentVersion, KnowledgeImportPreview } from '../src/api/admin'
 
 const currentVersion: DocumentVersion = {
@@ -51,6 +52,8 @@ async function mockAdminApi(page: Page, initialRole: 'patient' | 'admin' | 'anon
     const url = new URL(route.request().url())
     const method = route.request().method()
     const path = url.pathname
+    const workbench = path.endsWith('/knowledge/documents') ? undefined : emptyWorkbenchResponse(url)
+    if (workbench) return route.fulfill({ json: workbench })
     if (path === '/api/v1/admin/auth/session' && method === 'GET') {
       if (role !== 'admin') return route.fulfill({ status: role === 'patient' ? 403 : 401 })
       return route.fulfill({ json: { adminId: '200', displayName: '资料管理员' } })
@@ -172,7 +175,7 @@ test('管理员从独立登录进入工作台，核对可引用、索引失败�
   await expect(page).toHaveURL(/version=1/)
   await expect(chunk.getByText('不可引用 · 版本已归档')).toBeVisible()
   await expect(page.getByRole('button', { name: /取消与改约.*曾索引/ })).toBeVisible()
-  await page.getByRole('button', { name: '退出登录' }).click()
+  await page.getByRole('button', { name: '退出系统' }).click()
   await expect(page.getByRole('heading', { name: '管理员登录' })).toBeVisible()
   expect(unexpected).toEqual([])
 })

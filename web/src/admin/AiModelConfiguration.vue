@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, shallowRef, watchEffect } from 'vue'
+import KnowledgeIndexStatus from './KnowledgeIndexStatus.vue'
 import {
   activateAgentModel, adminHttpStatus, agentSettingsError, readAgentModelConfiguration, saveAgentModel,
   testAgentModel, updateAgentTimeouts, type AgentModelConfiguration, type AgentTimeouts, type ModelDraft,
@@ -230,6 +231,7 @@ watchEffect((invalidate) => {
         </button>
       </div>
     </section>
+    <KnowledgeIndexStatus />
     <section class="admin-panel" aria-labelledby="admin-model-timeouts">
       <header class="admin-panel-toolbar">
         <h2 id="admin-model-timeouts">超时限制</h2>

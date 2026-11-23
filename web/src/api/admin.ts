@@ -46,6 +46,28 @@ export interface DocumentDetail {
   }[]
 }
 
+export interface KnowledgeLibraryGroup {
+  docType: DocumentType; documents: number; versions: number; published: number
+  drafts: number; archived: number; indexed: number; pending: number; failed: number
+}
+export interface KnowledgeIndexSummary {
+  model: string; dimensions: number; provider: 'LOCAL' | 'API'; store: 'QDRANT' | 'MEMORY' | 'DISABLED'
+  collection: string | null; pointCount: number | null; status: 'REACHABLE' | 'UNAVAILABLE' | 'DISABLED'
+}
+export type VectorState = 'READY' | 'MISSING' | 'UNVERIFIED' | 'NOT_INDEXED'
+export interface KnowledgeFragment {
+  id: number; chunkNo: number; heading: string | null; content: string | null; charCount: number
+  embeddingStatus: IndexStatus; failureReason: string | null; indexedAt: string | null
+  docNo: string; title: string; version: number; docType: DocumentType; source: string; documentStatus: VersionStatus
+  vectorState: VectorState | null; vectorModel: string | null; vectorDimensions: number | null
+}
+export interface FragmentFilters { docType?: DocumentType; status?: VersionStatus; embedding?: IndexStatus; q?: string; page: number }
+export interface KnowledgeProbe {
+  indexAvailable: boolean; unavailableReason: string | null
+  hits: { id: number; docNo: string; title: string; version: number; heading: string | null; content: string;
+    source: string; chunkNo: number | null; score: number }[]
+}
+
 export interface AgentTaskSummary {
   taskId: string
   taskType: string
@@ -67,6 +89,7 @@ export interface AgentTraceEntry {
   tool: string | null
   resultCount: number | null
   modelVersion?: string | null
+  promptVersion?: string | null
 }
 
 export interface AgentTracePage {
@@ -173,7 +196,7 @@ export function adminLoginTarget(value: unknown) {
   if (typeof value !== 'string' || !value.startsWith('/')) return '/admin'
   try {
     const target = new URL(value, window.location.origin)
-    const adminPath = /^\/admin(?:\/tool-logs|\/tool-registry|\/model-config|\/knowledge(?:\/import\/preview|\/[^/]+)?)?\/?$/.test(target.pathname)
+    const adminPath = /^\/admin(?:\/departments|\/doctors|\/schedules|\/tool-logs|\/tool-registry|\/agent-timeline|\/visit-operations|\/model-calls|\/model-config|\/prompt-templates|\/knowledge-library|\/knowledge-chunks|\/knowledge-index|\/knowledge(?:\/import\/preview|\/[^/]+)?)?\/?$/.test(target.pathname)
     if (target.origin === window.location.origin && adminPath) {
       return target.pathname + target.search + target.hash
     }
@@ -234,6 +257,17 @@ export async function readDocument(docNo: string, version: string | undefined, s
   return data
 }
 
+export async function readKnowledgeLibrary(signal: AbortSignal) {
+  return (await adminHttp.get<KnowledgeLibraryGroup[]>('/knowledge/library', { signal })).data
+}
+export async function readKnowledgeIndexSummary(signal: AbortSignal) {
+  return (await adminHttp.get<KnowledgeIndexSummary>('/knowledge/index/summary', { signal })).data
+}
+export async function readKnowledgeFragments(filters: FragmentFilters, vectors: boolean, signal: AbortSignal) {
+  return (await adminHttp.get<{ items: KnowledgeFragment[]; page: number; hasNext: boolean; totalPages?: number }>(
+    '/knowledge/chunks', { params: { ...filters, vectors }, signal })).data
+}
+
 export async function readRecentAgentTasks(signal: AbortSignal) {
   const { data } = await adminHttp.get<AgentTaskSummary[]>('/agent/tasks', { signal })
   return data
@@ -255,6 +289,11 @@ async function writeAgentSettings<T>(method: 'post' | 'put', url: string, data: 
   return (await adminHttp.request<T>({ method, url, data, headers, timeout })).data
 }
 
+export const probeKnowledge = (query: string, docType: DocumentType | undefined, topK: number) =>
+  writeAgentSettings<KnowledgeProbe>('post', '/knowledge/index/probe', { query, docType, topK }, 40_000)
+export const retryKnowledgeIndex = (chunkId: number) =>
+  writeAgentSettings<{ status: 'INDEXED' | 'ALREADY_READY' }>('post', '/knowledge/chunks/' + chunkId + '/retry-index', undefined, 45_000)
+
 export function agentSettingsError(error: unknown) {
   if (axios.isAxiosError(error)) {
     const status = error.response?.status
@@ -275,10 +314,119 @@ export const testAgentModel = (id: number) =>
   writeAgentSettings<AgentModelConfiguration>('post', '/agent/model-config/models/' + id + '/test', undefined, 45_000)
 export const activateAgentModel = (id: number | null, expectedRevision: number) =>
   writeAgentSettings<AgentModelConfiguration>('post', '/agent/model-config/activate', { id, expectedRevision })
+
+export interface PromptGuidance { version: string; triage: string; selection: string }
+export type PromptDraft = Omit<PromptGuidance, 'version'> & { note: string }
+export interface PromptTrialOutput {
+  passed: boolean; decision: string | null; reply: string | null; tool: string | null; arguments: string | null; failure: string | null
+}
+export interface PromptTrialReport {
+  baselineVersion: string; modelVersion: string; modelLabel: string
+  cases: { key: string; label: string; input: string; expectation: string; baseline: PromptTrialOutput; candidate: PromptTrialOutput }[]
+}
+export interface PromptVersion {
+  id: number; prompt: PromptGuidance; note: string; createdBy: string; createdAt: string; testedAt: string | null
+  trialPassed: boolean | null; canActivate: boolean; report: PromptTrialReport | null
+}
+export interface PromptTemplateView {
+  revision: number; activeId: number | null; activatedAt: string | null; effectiveVersion: string
+  trialAvailable: boolean; runningTrial: number | null; builtIn: PromptGuidance; basePrompt: string; versions: PromptVersion[]
+}
+const promptTemplates = '/agent/prompt-templates'
+export async function readPromptTemplates(signal: AbortSignal) {
+  return (await adminHttp.get<PromptTemplateView>(promptTemplates, { signal })).data
+}
+export const savePromptTemplate = (draft: PromptDraft) =>
+  writeAgentSettings<PromptTemplateView>('post', promptTemplates + '/versions', draft)
+export const trialPromptTemplate = (id: number) =>
+  writeAgentSettings<PromptTemplateView>('post', promptTemplates + '/versions/' + id + '/trial', undefined, 120_000)
+export const activatePromptTemplate = (id: number | null, expectedRevision: number) =>
+  writeAgentSettings<PromptTemplateView>('post', promptTemplates + '/activate', { id, expectedRevision })
 export const updateAgentTimeouts = (timeout: AgentTimeouts, expectedRevision: number) =>
   writeAgentSettings<AgentModelConfiguration>('put', '/agent/model-config/policy', { ...timeout, expectedRevision })
 export const updateRegisteredTool = (name: string, enabled: boolean, timeoutMs: number | null, expectedRevision: number) =>
   writeAgentSettings<RegisteredTool[]>('put', '/agent/tools/' + encodeURIComponent(name), { enabled, timeoutMs, expectedRevision })
+
+type CatalogStatus = 'ACTIVE' | 'DISABLED'
+export type ClinicPeriod = 'MORNING' | 'AFTERNOON' | 'EVENING'
+export type CatalogKind = 'departments' | 'doctors'
+export interface CatalogOption { id: number; name: string; status: CatalogStatus }
+export interface DepartmentRow extends CatalogOption { code: string; description: string | null }
+export interface DoctorRow extends CatalogOption {
+  departmentId: number; departmentName: string; title: string | null; specialty: string | null; introduction: string | null
+}
+export interface ScheduleRow {
+  id: number; departmentId: number; departmentName: string; doctorId: number; doctorName: string
+  scheduleDate: string; clinicPeriod: ClinicPeriod; status: 'OPEN' | 'CLOSED'
+  slots: number; remaining: number; booked: number
+}
+export interface ScheduleDetail {
+  schedule: ScheduleRow
+  slots: { number: number; startAt: string; endAt: string; status: 'AVAILABLE' | 'RESERVED' | 'CLOSED' }[]
+}
+export interface ScheduleInput {
+  departmentId: number; doctorId: number; date: string; period: ClinicPeriod; start: string; minutes: number; count: number
+}
+type CatalogPage<T> = { items: T[]; page: number; hasNext: boolean; totalPages?: number }
+type CatalogFilters = { q?: string; status?: string; departmentId?: number; doctorId?: number; from?: string; to?: string; page: number }
+const catalogPath = '/catalog/'
+export async function readCatalog<T>(kind: CatalogKind | 'schedules', params: CatalogFilters, signal: AbortSignal) {
+  return (await adminHttp.get<CatalogPage<T>>(catalogPath + kind, { params, signal })).data
+}
+export async function readCatalogOptions(kind: CatalogKind, signal: AbortSignal, departmentId?: number) {
+  return (await adminHttp.get<CatalogOption[]>(catalogPath + kind + '/options', { params: { departmentId }, signal })).data
+}
+export function saveCatalogEntry(kind: CatalogKind, id: number | undefined, data: unknown) {
+  return writeAgentSettings<void>(id === undefined ? 'post' : 'put', catalogPath + kind + (id === undefined ? '' : '/' + id), data)
+}
+export function setCatalogActive(kind: CatalogKind, id: number, active: boolean) {
+  return writeAgentSettings<void>('put', catalogPath + kind + '/' + id + '/status', { active })
+}
+export async function readScheduleDetail(id: number, signal: AbortSignal) {
+  return (await adminHttp.get<ScheduleDetail>(catalogPath + 'schedules/' + id, { signal })).data
+}
+export const createSchedule = (input: ScheduleInput) => writeAgentSettings<void>('post', catalogPath + 'schedules', input)
+export const closeSchedule = (id: number) => writeAgentSettings<void>('post', catalogPath + 'schedules/' + id + '/close', undefined)
+
+export interface AppointmentCounts { booked: number; portal: number; agent: number; remaining: number; occupied: number }
+export interface AppointmentOperationsFilters { from: string; to: string; departmentId?: number }
+export interface AppointmentOperations {
+  from: string
+  to: string
+  totals: AppointmentCounts
+  openSchedules: number
+  trend: (Pick<AppointmentCounts, 'booked' | 'portal' | 'agent'> & { date: string })[]
+  departments: { departmentId: number; departmentName: string; counts: AppointmentCounts }[]
+  doctors: { doctorId: number; doctorName: string; departmentId: number; departmentName: string; counts: AppointmentCounts }[]
+}
+export async function readAppointmentOperations(params: AppointmentOperationsFilters, signal: AbortSignal) {
+  return (await adminHttp.get<AppointmentOperations>('/observability/appointments', { params, signal })).data
+}
+
+export interface ModelCallFilters { from: string; to: string; model?: string }
+export interface ObservedModel { key: string; mode: string; version: string; label: string | null; modelName: string | null }
+export interface ModelCallMetrics {
+  attempts: number; succeeded: number; failed: number; retries: number; averageMs: number | null; p95Ms: number | null
+}
+export interface ModelCallOverview {
+  totals: ModelCallMetrics
+  options: ObservedModel[]
+  models: { model: ObservedModel; metrics: ModelCallMetrics }[]
+  trend: { date: string; succeeded: number; failed: number }[]
+  reasons: { code: string | null; attempts: number }[]
+}
+export type ModelCallOutcome = 'SUCCEEDED' | 'FAILED'
+export interface ModelCallAttempt {
+  recordedAt: string; taskId: string; sequence: number; modelKey: string; attempt: number | null;
+  outcome: ModelCallOutcome; reason: string | null; durationMs: number | null
+}
+export interface ModelCallPage { items: ModelCallAttempt[]; nextBefore: string | null }
+export async function readModelCallOverview(params: ModelCallFilters, signal: AbortSignal) {
+  return (await adminHttp.get<ModelCallOverview>('/observability/model-calls', { params, signal })).data
+}
+export async function readModelCallAttempts(params: ModelCallFilters & { outcome?: ModelCallOutcome; before?: string }, signal: AbortSignal) {
+  return (await adminHttp.get<ModelCallPage>('/observability/model-calls/attempts', { params, signal })).data
+}
 
 export async function readAdminAgentTrace(taskId: string, after: number, signal: AbortSignal) {
   const { data } = await adminHttp.get<AgentTracePage>('/agent/tasks/' + encodeURIComponent(taskId) + '/trace', {

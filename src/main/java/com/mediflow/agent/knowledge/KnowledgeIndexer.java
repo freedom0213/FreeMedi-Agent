@@ -88,13 +88,50 @@ public final class KnowledgeIndexer {
     }
 
     void indexChunk(KnowledgeRepository.PendingChunk chunk) {
+        writePoint(chunk);
+        repository.markIndexed(java.util.List.of(chunk.chunkId()), clock.instant());
+    }
+
+    private void writePoint(KnowledgeRepository.PendingChunk chunk) {
         // The Qdrant payload marks a ready point. MySQL's version allowlist controls patient visibility.
         index.upsert(java.util.List.of(new KnowledgeIndexPoint(
                 chunk.chunkId(), chunk.documentId(), chunk.version(), chunk.docType(),
                 chunk.departmentId(), chunk.doctorId(), KnowledgeStatus.PUBLISHED,
                 embedder.name(), embedder.embed(textToEmbed(chunk.heading(), chunk.content())))));
-        repository.markIndexed(java.util.List.of(chunk.chunkId()), clock.instant());
     }
+
+    public RetryOutcome retryPublishedChunk(long chunkId) {
+        try {
+            return repository.withIndexMaintenanceLock(() -> {
+                var chunk = repository.findChunkViews(java.util.List.of(chunkId)).stream().findFirst().orElse(null);
+                if (chunk == null) return RetryOutcome.NOT_FOUND;
+                if (chunk.status() != KnowledgeStatus.PUBLISHED) return RetryOutcome.NOT_PUBLISHED;
+                try {
+                    if (!index.available()) return RetryOutcome.UNAVAILABLE;
+                    if (chunk.embeddingStatus() == KnowledgeChunk.EmbeddingStatus.INDEXED
+                            && index.readyChunkIds(java.util.List.of(chunkId)).contains(chunkId)) {
+                        return RetryOutcome.ALREADY_READY;
+                    }
+                } catch (RuntimeException unavailable) {
+                    return RetryOutcome.UNAVAILABLE;
+                }
+                try {
+                    writePoint(new KnowledgeRepository.PendingChunk(chunk.chunkId(), chunk.documentId(), chunk.version(),
+                            chunk.heading(), chunk.content(), chunk.docType(), chunk.departmentId(), chunk.doctorId()));
+                } catch (RuntimeException failed) {
+                    logger.warn("Published chunk retry failed: chunkId={} type={}", chunkId, failed.getClass().getSimpleName());
+                    return repository.updatePublishedIndex(chunkId, null, IndexFailureMessage.display(failed.getMessage()))
+                            ? RetryOutcome.FAILED : RetryOutcome.NOT_PUBLISHED;
+                }
+                return repository.updatePublishedIndex(chunkId, clock.instant(), null)
+                        ? RetryOutcome.INDEXED : RetryOutcome.NOT_PUBLISHED;
+            });
+        } catch (KnowledgeRepository.IndexMaintenanceBusy busy) {
+            return RetryOutcome.BUSY;
+        }
+    }
+
+    public enum RetryOutcome { INDEXED, ALREADY_READY, NOT_FOUND, NOT_PUBLISHED, UNAVAILABLE, FAILED, BUSY }
 
     /**
      * Throws the index away and builds it again from MySQL.

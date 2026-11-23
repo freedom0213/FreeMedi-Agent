@@ -4,6 +4,7 @@ import { ArrowLeft, ChevronDown, FileText, FileUp } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { maxMarkdownBytes, previewMarkdown, saveKnowledgeDraft, type KnowledgeImportPreview } from '../api/admin'
 import { documentTypeLabels, versionLabels } from './knowledgeLabels'
+import AdminPagination from './AdminPagination.vue'
 
 const selectedFile = shallowRef<File>()
 const result = shallowRef<KnowledgeImportPreview>()
@@ -162,11 +163,8 @@ async function saveDraft() {
         </summary>
         <p class="admin-chunk-text">{{ chunk.content }}</p>
       </details>
-      <footer v-if="chunks.length > pageSize" class="admin-panel-toolbar" aria-label="片段分页">
-        <button class="admin-button" type="button" :disabled="page === 0" @click="page--">上一页</button>
-        <span class="admin-muted" aria-live="polite">{{ firstChunk + 1 }}–{{ firstChunk + visibleChunks.length }} / {{ chunks.length }}</span>
-        <button class="admin-button" type="button" :disabled="firstChunk + visibleChunks.length >= chunks.length" @click="page++">下一页</button>
-      </footer>
+      <AdminPagination v-if="chunks.length > pageSize" :page="page + 1" :total-pages="Math.ceil(chunks.length / pageSize)"
+        @change="page = $event - 1" />
     </section>
   </template>
 </template>

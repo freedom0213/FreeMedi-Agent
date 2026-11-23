@@ -1,7 +1,9 @@
 package com.mediflow.agent.config;
 
 import com.mediflow.agent.agent.AgentCallPolicy;
+import com.mediflow.agent.agent.AgentPrompt;
 import com.mediflow.agent.agent.AgentRequestSettings;
+import com.mediflow.agent.agent.DecisionModel;
 import com.mediflow.agent.agent.ReadToolExecutor;
 import com.mediflow.agent.agent.ReadToolSpec;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -17,8 +19,12 @@ import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.sql.Timestamp;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -52,12 +58,13 @@ public class AgentSettings {
     private final ThreadPoolTaskExecutor executor;
     private final AgentCallPolicy defaults;
     private final List<ReadToolSpec> catalog;
+    private final AgentPromptRepository prompts;
     private final Semaphore tests = new Semaphore(1);
     private volatile State state;
 
     AgentSettings(JdbcTemplate jdbc, PlatformTransactionManager transactions, AgentModelClients clients,
                   AgentModelSecrets secrets, @Qualifier("agentCallExecutor") ThreadPoolTaskExecutor executor, AgentCallPolicy defaults,
-                  @Qualifier("readToolExecutor") ReadToolExecutor tools) {
+                  @Qualifier("readToolExecutor") ReadToolExecutor tools, AgentPromptRepository prompts) {
         this.jdbc = jdbc;
         this.transactions = new TransactionTemplate(transactions);
         this.clients = clients;
@@ -65,10 +72,54 @@ public class AgentSettings {
         this.executor = executor;
         this.defaults = defaults;
         this.catalog = tools.tools();
+        this.prompts = prompts;
         this.state = loadState(null);
     }
 
     public AgentRequestSettings snapshot() { return state.settings(); }
+
+    synchronized void usePrompt(AgentPrompt prompt) {
+        var before = state;
+        var settings = before.settings();
+        var effective = settings.model() instanceof DeepSeekDecisionModel ? prompt : AgentPrompt.BUILT_IN;
+        state = new State(before.active(), before.activatedAt(), before.revision(), before.tools(),
+                new AgentRequestSettings(settings.model(), settings.modelVersion(), settings.calls(), settings.tools(), effective));
+    }
+
+    synchronized String promptTrialFingerprint() {
+        var settings = state.settings();
+        if (!(settings.model() instanceof DeepSeekDecisionModel)) return null;
+        String identity = state.active() == null ? clients.initialIdentity() : settings.modelVersion();
+        String tools = promptTrialTools(settings).stream().map(ReadToolSpec::name).sorted().toList().toString();
+        try {
+            byte[] input = (AgentPromptTrials.SUITE_VERSION + "\n" + DeepSeekDecisionModel.SYSTEM_PROMPT + "\n"
+                    + identity + "\n" + tools + "\n" + settings.calls().settings().modelTimeoutMs())
+                    .getBytes(StandardCharsets.UTF_8);
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(input));
+        } catch (NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
+    }
+
+    synchronized PromptTrialContext promptTrialContext() {
+        String fingerprint = promptTrialFingerprint();
+        if (fingerprint == null) throw new ResponseStatusException(HttpStatus.CONFLICT, "请先启用可用的外部模型配置。");
+        var settings = state.settings();
+        var active = state.active();
+        long timeout = Math.min(5_000, settings.calls().settings().modelTimeoutMs());
+        var model = active == null ? clients.initial(timeout)
+                : clients.managed(clients.managedUrl(active.baseUrl()), active.modelName(),
+                        secrets.decrypt(storedKey(active.id())), timeout);
+        String label = active == null ? "启动配置 · " + clients.initialModel() : active.label() + " · " + active.modelName();
+        return new PromptTrialContext(model, settings.prompt(), settings.modelVersion(), label, fingerprint, promptTrialTools(settings));
+    }
+
+    private List<ReadToolSpec> promptTrialTools(AgentRequestSettings settings) {
+        return catalog.stream().filter(tool -> settings.toolEnabled(tool.name())).toList();
+    }
+
+    record PromptTrialContext(DecisionModel model, AgentPrompt baseline, String modelVersion, String label,
+                              String fingerprint, List<ReadToolSpec> tools) {}
 
     public synchronized ModelView modelView() {
         State current = state;
@@ -255,7 +306,8 @@ public class AgentSettings {
             policies.put(tool.name(), new AgentRequestSettings.ToolPolicy(tool.enabled(), tool.timeoutMs()));
         }
         return new State(active, configured.activatedAt(), configured.revision(), Map.copyOf(tools),
-                new AgentRequestSettings(model, modelVersion, calls, policies));
+                new AgentRequestSettings(model, modelVersion, calls, policies,
+                        model instanceof DeepSeekDecisionModel ? prompts.selection().prompt() : AgentPrompt.BUILT_IN));
     }
 
     private ModelRevision model(long id) {
@@ -267,7 +319,7 @@ public class AgentSettings {
         return jdbc.queryForObject("SELECT encrypted_key FROM agent_model_revision WHERE id = ?", byte[].class, id);
     }
 
-    private void audit(long admin, String action, String target, String details) {
+    void audit(long admin, String action, String target, String details) {
         jdbc.update("INSERT INTO agent_settings_change (admin_id, action, target, details) VALUES (?, ?, ?, ?)",
                 admin, action, target, details);
     }

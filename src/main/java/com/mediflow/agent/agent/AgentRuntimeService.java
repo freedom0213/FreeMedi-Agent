@@ -141,11 +141,12 @@ public final class AgentRuntimeService implements AgentRuntime {
                 var availableTools = toolExecutor.tools().stream()
                         .filter(tool -> request.settings().toolEnabled(tool.name())).toList();
                 decision = request.settings().calls().run(AgentCallPolicy.Kind.MODEL, request.deadline(),
-                        () -> decisionModel.decide(input, availableTools),
+                        () -> decisionModel.decide(input, availableTools, request.settings().prompt()),
                         answer -> answer == null ? "MODEL_EMPTY_RESULT" : null,
                         (attempt, answer) -> traceAttempt(context, "MODEL_DECISION", attempt, Map.of(
                                 "adapter", decisionModel.getClass().getSimpleName(),
                                 "modelVersion", request.settings().modelVersion(),
+                                "promptVersion", request.settings().prompt().version(),
                                 "decision", answer == null ? "" : answer.getClass().getSimpleName())));
             } catch (AgentCallPolicy.Failure failure) {
                 logger.warn("Agent decision failed: taskId={}, reason={}", taskId.value(), failure.code());

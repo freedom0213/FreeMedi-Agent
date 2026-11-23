@@ -139,6 +139,75 @@ public final class KnowledgeRepository {
 
     public record ChunkCount(long documentId, KnowledgeChunk.EmbeddingStatus status, int count) {}
 
+    public List<LibraryGroup> libraryGroups() {
+        return jdbc.query("""
+                SELECT d.doc_type, COUNT(DISTINCT d.doc_no) AS documents, COUNT(*) AS versions,
+                       SUM(d.status = 'PUBLISHED') AS published, SUM(d.status = 'DRAFT') AS drafts,
+                       SUM(d.status = 'ARCHIVED') AS archived,
+                       COALESCE(SUM(CASE WHEN d.status = 'PUBLISHED' THEN c.indexed END), 0) AS indexed,
+                       COALESCE(SUM(CASE WHEN d.status = 'PUBLISHED' THEN c.pending END), 0) AS pending,
+                       COALESCE(SUM(CASE WHEN d.status = 'PUBLISHED' THEN c.failed END), 0) AS failed
+                FROM knowledge_document d
+                LEFT JOIN (
+                    SELECT document_id, version, SUM(embedding_status = 'INDEXED') AS indexed,
+                           SUM(embedding_status = 'PENDING') AS pending, SUM(embedding_status = 'FAILED') AS failed
+                    FROM knowledge_chunk GROUP BY document_id, version
+                ) c ON c.document_id = d.id AND c.version = d.version
+                GROUP BY d.doc_type ORDER BY d.doc_type
+                """, (rs, row) -> new LibraryGroup(KnowledgeDocType.from(rs.getString("doc_type")),
+                rs.getInt("documents"), rs.getInt("versions"), rs.getInt("published"), rs.getInt("drafts"),
+                rs.getInt("archived"), rs.getInt("indexed"), rs.getInt("pending"), rs.getInt("failed")));
+    }
+
+    AdminChunkPage adminChunks(KnowledgeDocType type, KnowledgeStatus status,
+                                 KnowledgeChunk.EmbeddingStatus embedding, String query, int limit, long offset) {
+        String pattern = query == null || query.isBlank() ? null
+                : "%" + query.strip().replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%";
+        String typeName = type == null ? null : type.name();
+        String statusName = status == null ? null : status.name();
+        String embeddingName = embedding == null ? null : embedding.name();
+        String source = """
+                FROM knowledge_chunk c JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+                WHERE (? IS NULL OR d.doc_type = ?) AND (? IS NULL OR d.status = ?)
+                  AND (? IS NULL OR c.embedding_status = ?)
+                  AND (? IS NULL OR d.doc_no LIKE ? ESCAPE '!' OR d.title LIKE ? ESCAPE '!'
+                       OR c.heading LIKE ? ESCAPE '!' OR c.content LIKE ? ESCAPE '!')
+                """;
+        long total = jdbc.queryForObject("SELECT COUNT(*) " + source, Long.class, typeName, typeName,
+                statusName, statusName, embeddingName, embeddingName, pattern, pattern, pattern, pattern, pattern);
+        if (offset >= total) return new AdminChunkPage(List.of(), total);
+        var items = jdbc.query("""
+                SELECT c.id, c.chunk_no, c.heading, c.content, c.char_count, c.embedding_status, c.index_error, c.indexed_at,
+                       d.doc_no, d.title, d.version, d.doc_type, d.source, d.status
+                """ + source + " ORDER BY d.doc_no, d.version DESC, c.chunk_no LIMIT ? OFFSET ?",
+                (rs, row) -> new AdminChunk(rs.getLong("id"), rs.getInt("chunk_no"), rs.getString("heading"),
+                rs.getString("content"), rs.getInt("char_count"),
+                KnowledgeChunk.EmbeddingStatus.valueOf(rs.getString("embedding_status")), rs.getString("index_error"),
+                toInstant(rs.getTimestamp("indexed_at")), rs.getString("doc_no"), rs.getString("title"),
+                rs.getInt("version"), KnowledgeDocType.from(rs.getString("doc_type")), rs.getString("source"),
+                KnowledgeStatus.valueOf(rs.getString("status"))), typeName, typeName, statusName, statusName,
+                embeddingName, embeddingName, pattern, pattern, pattern, pattern, pattern, limit, offset);
+        return new AdminChunkPage(items, total);
+    }
+
+    record AdminChunkPage(List<AdminChunk> items, long total) {}
+
+    boolean updatePublishedIndex(long chunkId, Instant indexedAt, String error) {
+        return jdbc.update("""
+                UPDATE knowledge_chunk c JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+                SET c.embedding_status = ?, c.indexed_at = ?, c.index_error = ?
+                WHERE c.id = ? AND d.status = 'PUBLISHED'
+                """, error == null ? "INDEXED" : "FAILED", indexedAt == null ? null : Timestamp.from(indexedAt),
+                error, chunkId) != 0;
+    }
+
+    public record LibraryGroup(KnowledgeDocType docType, int documents, int versions, int published,
+                               int drafts, int archived, int indexed, int pending, int failed) {}
+
+    record AdminChunk(long id, int number, String heading, String content, int charCount,
+                      KnowledgeChunk.EmbeddingStatus embedding, String error, Instant indexedAt, String docNo,
+                      String title, int version, KnowledgeDocType type, String source, KnowledgeStatus status) {}
+
     public List<KnowledgeDocument> listByStatus(KnowledgeStatus status) {
         return jdbc.query(DOCUMENT_COLUMNS + " WHERE status = ? ORDER BY doc_no, version",
                 KnowledgeRepository::mapDocument, status.name());

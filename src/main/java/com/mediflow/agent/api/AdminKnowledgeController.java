@@ -2,6 +2,7 @@ package com.mediflow.agent.api;
 
 import com.mediflow.agent.knowledge.KnowledgeChunk;
 import com.mediflow.agent.knowledge.KnowledgeChunk.EmbeddingStatus;
+import com.mediflow.agent.knowledge.IndexFailureMessage;
 import com.mediflow.agent.knowledge.KnowledgeDocType;
 import com.mediflow.agent.knowledge.KnowledgeDocument;
 import com.mediflow.agent.knowledge.KnowledgeRepository;
@@ -120,20 +121,10 @@ public class AdminKnowledgeController {
                             EmbeddingStatus embeddingStatus, boolean retrievable, String failureReason) {
         private static ChunkInfo from(KnowledgeStatus status, KnowledgeChunk chunk) {
             var embedding = chunk.embeddingStatus();
-            String reason = embedding == EmbeddingStatus.FAILED ? safeFailureReason(chunk.indexError()) : null;
+            String reason = embedding == EmbeddingStatus.FAILED ? IndexFailureMessage.display(chunk.indexError()) : null;
             return new ChunkInfo(chunk.chunkNo(), chunk.heading(), chunk.content(), chunk.charCount(),
                     embedding, KnowledgeChunk.retrievable(status, embedding), reason);
         }
 
-        private static String safeFailureReason(String error) {
-            if (error != null) {
-                if (error.startsWith("无法访问 Qdrant")) return "连接 Qdrant 失败，请检查向量库服务。";
-                if (error.startsWith("向量维度与集合不一致") || error.startsWith("embedding 返回")) {
-                    return "向量维度不一致，请核对模型和集合的维度配置。";
-                }
-                if (error.startsWith("拒绝写入其它模型产生的向量")) return "向量来自不同的模型，请核对索引配置。";
-            }
-            return "向量生成或写入失败，请查看索引任务日志。";
-        }
     }
 }

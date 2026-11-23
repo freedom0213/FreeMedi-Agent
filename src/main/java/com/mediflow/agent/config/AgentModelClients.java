@@ -48,6 +48,7 @@ final class AgentModelClients {
     boolean demo() { return initialKey.isBlank(); }
     String initialUrl() { return initialUrl; }
     String initialModel() { return initialModel; }
+    String initialIdentity() { return initialUrl + "\n" + initialModel + "\n" + initialKey; }
 
     String managedUrl(String input) {
         String url = canonicalUrl(input);

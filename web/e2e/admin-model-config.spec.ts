@@ -1,5 +1,9 @@
 import { expect, test } from '@playwright/test'
+import { emptyWorkbenchResponse } from './admin-workbench-fixture'
 import type { AgentModelConfiguration, ModelRevision } from '../src/api/admin'
+
+const embedding = { model: 'browser-fixture-embedder', dimensions: 512, provider: 'LOCAL', store: 'MEMORY',
+  collection: null, pointCount: 4, status: 'REACHABLE' }
 
 test('按后端值展示模型配置，并在演示模式显示实际决策实现', async ({ page }) => {
   const configuration: AgentModelConfiguration = {
@@ -16,7 +20,10 @@ test('按后端值展示模型配置，并在演示模式显示实际决策实�
   await page.setViewportSize({ width: 390, height: 844 })
   await page.route('**/api/**', async route => {
     const path = new URL(route.request().url()).pathname
+    const workbench = emptyWorkbenchResponse(new URL(route.request().url()))
+    if (workbench) return route.fulfill({ json: workbench })
     if (path === '/api/v1/admin/auth/session') return route.fulfill({ json: { adminId: '200', displayName: '资料管理员' } })
+    if (path === '/api/v1/admin/knowledge/index/summary') return route.fulfill({ json: embedding })
     if (path === '/api/v1/admin/agent/model-config' && route.request().method() === 'GET') {
       if (fail) {
         fail = false
@@ -28,11 +35,14 @@ test('按后端值展示模型配置，并在演示模式显示实际决策实�
     return route.fulfill({ status: 500 })
   })
   await page.goto('/admin')
+  await page.getByRole('button', { name: '展开菜单' }).click()
+  await page.getByRole('button', { name: 'AI 能力配置' }).click()
   await page.getByRole('link', { name: 'AI 模型配置' }).click()
   await expect(page.getByRole('alert').getByText('模型配置加载失败。', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '重新加载' }).click()
   const model = page.getByRole('region', { name: '当前导诊决策模型' })
   await expect(model.getByText('browser-fixture-model')).toBeVisible()
+  await expect(page.getByRole('region', { name: '当前向量模型' }).getByText(embedding.model)).toBeVisible()
   const timeouts = page.getByRole('region', { name: '超时限制' })
   for (const value of ['12.4 秒', '3.6 秒', '27.4 秒']) await expect(timeouts.getByText(value, { exact: true })).toBeVisible()
   const retries = page.getByRole('region', { name: '重试规则' })
@@ -67,6 +77,7 @@ test('在窄屏保存第二套配置、测试后手动启用，并可切回启�
     const path = new URL(route.request().url()).pathname
     const base = '/api/v1/admin/agent/model-config'
     if (path.endsWith('/auth/session')) return route.fulfill({ json: { adminId: '200', displayName: '资料管理员' } })
+    if (path === '/api/v1/admin/knowledge/index/summary') return route.fulfill({ json: embedding })
     if (path.endsWith('/auth/csrf')) return route.fulfill({ json: { adminId: '200', headerName: 'X-CSRF-TOKEN', token: 'fixture' } })
     if (path === base && method === 'GET') return route.fulfill({ json: configuration })
     expect(route.request().headers()['x-csrf-token']).toBe('fixture')

@@ -1,5 +1,8 @@
 package com.mediflow.agent.config;
 
+import com.mediflow.agent.agent.AgentPrompt;
+import com.mediflow.agent.agent.TaskStatus;
+
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -39,7 +42,7 @@ import dev.ai4j.openai4j.OpenAiHttpException;
 public final class DeepSeekDecisionModel implements DecisionModel {
     static final int SDK_MAX_RETRIES = 0;
     private static final int MAX_DECISION_ATTEMPTS = 2;
-    private static final String SYSTEM_PROMPT = """
+    static final String SYSTEM_PROMPT = """
             你是 FreeMedi 医院的导诊与预约助手。只能根据用户消息、任务状态和工具结果提出下一步决策。
             只可调用提供的只读工具；不得声称已经预约成功，不得执行或要求执行写操作。
             面向普通患者交流，始终使用自然、易懂的中文。不得要求患者使用 yyyy-MM-dd，不得在回复中出现 MORNING、AFTERNOON、EVENING、数据库 ID 或工具名。
@@ -89,8 +92,14 @@ public final class DeepSeekDecisionModel implements DecisionModel {
 
     @Override
     public AgentDecision decide(DecisionContext context, List<ReadToolSpec> tools) {
+        return decide(context, tools, AgentPrompt.BUILT_IN);
+    }
+
+    @Override
+    public AgentDecision decide(DecisionContext context, List<ReadToolSpec> tools, AgentPrompt prompt) {
+        boolean triageOnly = needsTriageDirection(context.userMessage());
         List<ChatMessage> messages = new ArrayList<>();
-        messages.add(SystemMessage.from(SYSTEM_PROMPT + "\n当前日期（北京时间）："
+        messages.add(SystemMessage.from(SYSTEM_PROMPT + additionalGuidance(context, prompt, triageOnly) + "\n当前日期（北京时间）："
                 + LocalDate.now(clock.withZone(ZoneId.of("Asia/Shanghai"))) + unavailableToolsNotice(tools)));
         context.task().turns().stream()
                 .filter(turn -> turn.assistantMessage() != null)
@@ -118,7 +127,6 @@ public final class DeepSeekDecisionModel implements DecisionModel {
             messages.add(UserMessage.from("只读工具执行结果（JSON）：" + write(results)));
         }
 
-        boolean triageOnly = needsTriageDirection(context.userMessage());
         if (triageOnly) {
             messages.add(UserMessage.from("本轮先讨论就诊方向。请用 ASK_USER 给出初步科室建议或补问关键信息，"
                     + "询问是否按该方向查号。紧急情况请按急症提示用 REPLY。"));
@@ -186,6 +194,20 @@ public final class DeepSeekDecisionModel implements DecisionModel {
             }
         }
         throw new ModelDecisionException(INVALID_DECISION);
+    }
+
+    private static String additionalGuidance(DecisionContext context, AgentPrompt prompt, boolean triageOnly) {
+        String message = context.userMessage();
+        if (HospitalKnowledgeQuestion.isConsultation(message) || message.matches("(?s).*(呼吸困难|持续胸痛|意识不清).*")) {
+            return "";
+        }
+        var status = context.task().status();
+        boolean selection = (status == TaskStatus.PROPOSAL_READY || status == TaskStatus.AWAITING_CONFIRMATION)
+                && message.matches("(?s).*(选号|选|候选|确认|提交|哪个好|区别).*");
+        String guidance = triageOnly ? prompt.triage() : selection ? prompt.selection() : "";
+        if (guidance.isBlank()) return "";
+        return "\n本场景的补充表达指引，仅用于措辞和信息组织。遇到冲突时遵循上面的分诊、工具、预约确认及输出协议。\n"
+                + guidance + "\n补充表达指引结束。\n";
     }
 
     private static boolean needsTriageDirection(String message) {

@@ -29,7 +29,7 @@ watch(() => route.fullPath, () => {
   draftNotice.value = undefined
 })
 
-watch([() => route.params.docNo, () => route.query.version, attempt], ([docNo, version], _previous, invalidate) => {
+watch([() => route.params.docNo, () => route.query.version, () => route.query.chunk, attempt], ([docNo, version, fragment], _previous, invalidate) => {
   if (typeof docNo !== 'string') return
   const request = new AbortController()
   invalidate(() => request.abort())
@@ -37,7 +37,7 @@ watch([() => route.params.docNo, () => route.query.version, attempt], ([docNo, v
   readDocument(docNo, typeof version === 'string' ? version : undefined, request.signal).then((data) => {
     if (request.signal.aborted) return
     detail.value = data
-    selectedChunkNo.value = data.chunks[0]?.chunkNo
+    selectedChunkNo.value = data.chunks.find(item => String(item.chunkNo) === fragment)?.chunkNo ?? data.chunks[0]?.chunkNo
     state.value = 'ready'
   }).catch((error) => {
     if (request.signal.aborted) return

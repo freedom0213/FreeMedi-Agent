@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test'
+import { emptyWorkbenchResponse } from './admin-workbench-fixture'
 import type { RegisteredTool } from '../src/api/admin'
 
 test('从管理菜单查看三个工具、参数和患者确认边界', async ({ page }) => {
@@ -17,6 +18,8 @@ test('从管理菜单查看三个工具、参数和患者确认边界', async ({
   const unexpected: string[] = []
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname
+    const workbench = emptyWorkbenchResponse(new URL(route.request().url()))
+    if (workbench) return route.fulfill({ json: workbench })
     if (path === '/api/v1/admin/auth/session') return route.fulfill({ json: { adminId: '200', displayName: '资料管理员' } })
     if (path === '/api/v1/admin/agent/tools' && route.request().method() === 'GET') {
       return route.fulfill({ json: tools })
@@ -25,6 +28,8 @@ test('从管理菜单查看三个工具、参数和患者确认边界', async ({
     return route.fulfill({ status: 500 })
   })
   await page.goto('/admin')
+  await page.getByRole('button', { name: '展开菜单' }).click()
+  await page.getByRole('button', { name: 'Agent 工具中心' }).click()
   await page.getByRole('link', { name: '工具注册表' }).click()
   await expect(page.getByText('创建预约需要患者确认')).toBeVisible()
   await expect(page.getByText(/点击「确认预约」后，后端才会创建并核验预约/)).toBeVisible()

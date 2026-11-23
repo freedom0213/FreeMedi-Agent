@@ -62,12 +62,14 @@ public class AdminAgentTraceController {
         String tool = readAttempt && proposedTool instanceof String name && tools.contains(name) ? name : null;
         var count = action.summary().get("resultCount");
         var version = action.summary().get("modelVersion");
+        var prompt = action.summary().get("promptVersion");
+        boolean modelDecision = "MODEL_DECISION".equals(row.type());
         return new AdminTraceEntry(row.sequence(), row.recordedAt(), row.type(), action.turnNo(),
                 action.stepNo(), action.attempt(), action.outcome(), safeCode(row.reason()),
                 TIMED_ACTIONS.contains(row.type()) ? action.durationMs() : null, tool,
                 readAttempt && count instanceof Number number ? number.intValue() : null,
-                "MODEL_DECISION".equals(row.type()) && version instanceof String value
-                        && value.matches("[a-z0-9/-]{1,64}") ? value : null);
+                modelDecision && version instanceof String value && value.matches("[a-z0-9/-]{1,64}") ? value : null,
+                modelDecision && prompt instanceof String value && value.matches("(builtin-)?v[1-9][0-9]{0,18}") ? value : null);
     }
 
     private static String safeCode(String reason) {
@@ -78,5 +80,5 @@ public class AdminAgentTraceController {
 
     public record AdminTraceEntry(long sequence, Instant recordedAt, String type, int turnNo, int stepNo,
                                   int attempt, String outcome, String reason, Long durationMs,
-                                  String tool, Integer resultCount, String modelVersion) {}
+                                  String tool, Integer resultCount, String modelVersion, String promptVersion) {}
 }

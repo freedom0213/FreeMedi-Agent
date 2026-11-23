@@ -400,21 +400,27 @@ public final class AppointmentWriteService {
         if (slotId == null) {
             return null;
         }
-        return jdbc.query("""
-                SELECT s.id, s.status, ds.doctor_id, d.department_id
+        var path = jdbc.query("""
+                SELECT ds.id AS schedule_id, ds.doctor_id, d.department_id
                 FROM appointment_slot s
                 JOIN doctor_schedule ds ON ds.id = s.schedule_id
                 JOIN doctor d ON d.id = ds.doctor_id
-                JOIN department dept ON dept.id = d.department_id
                 WHERE s.id = ?
-                  AND s.start_at > UTC_TIMESTAMP(3)
-                  AND ds.status = 'OPEN'
-                  AND d.status = 'ACTIVE'
-                  AND dept.status = 'ACTIVE'
+                """, (row, index) -> new SlotPath(row.getLong("schedule_id"), row.getLong("doctor_id"),
+                row.getLong("department_id")), slotId).stream().findFirst().orElse(null);
+        if (path == null
+                || !"ACTIVE".equals(AppointmentAvailability.lockDepartment(jdbc, path.departmentId()))
+                || !"ACTIVE".equals(AppointmentAvailability.lockDoctor(jdbc, path.departmentId(), path.doctorId()))
+                || !"OPEN".equals(AppointmentAvailability.lockSchedule(jdbc, path.doctorId(), path.scheduleId()))) {
+            return null;
+        }
+        return jdbc.query("""
+                SELECT id, status
+                FROM appointment_slot
+                WHERE id = ? AND schedule_id = ? AND start_at > UTC_TIMESTAMP(3)
                 FOR UPDATE
                 """, (result, rowNum) -> new SlotRow(
-                result.getLong("id"), result.getString("status"),
-                result.getLong("doctor_id"), result.getLong("department_id")), slotId)
+                result.getLong("id"), result.getString("status"), path.doctorId(), path.departmentId()), slotId, path.scheduleId())
                 .stream().findFirst().orElse(null);
     }
 
@@ -424,6 +430,8 @@ public final class AppointmentWriteService {
 
     private record SlotRow(long id, String status, long doctorId, long departmentId) {
     }
+
+    private record SlotPath(long scheduleId, long doctorId, long departmentId) {}
 
     private record ExistingRow(String appointmentNo, long planId, long slotId, String source) {
     }
