@@ -64,6 +64,10 @@ a { color: inherit; text-decoration: none; }
 .profile-button:disabled { opacity: .58; cursor: not-allowed; }
 .mobile-menu { display: none; border: 0; background: transparent; }
 main { flex: 1; }
+@media (prefers-reduced-motion: no-preference) {
+  .patient-page-content, .admin-page-content { animation: route-in 150ms cubic-bezier(.2,.75,.3,1); }
+}
+@keyframes route-in { from { opacity: .68; transform: translateY(4px); } }
 .site-footer { margin-top: 46px; border-top: 1px solid var(--brand-line); background: var(--brand-soft); }
 .footer-inner { min-height: 60px; display: flex; align-items: center; gap: 22px; color: var(--brand-muted); font-size: 12px; }
 .footer-inner > span:first-child { color: var(--brand-ink); font-weight: 700; }

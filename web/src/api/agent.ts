@@ -2,6 +2,21 @@ import type { AgentResult, ConfirmationIntent, RequirementChanges, TaskCreated, 
 import { http } from './http'
 import { patientCsrfHeaders, requireLogin } from './auth'
 
+export interface GuideConversation {
+  taskId: string
+  title: string
+  status: TaskSnapshot['status']
+  updatedAt: string
+}
+
+export async function listGuideHistory(before?: number) {
+  const { data } = await http.get<{ items: GuideConversation[]; nextCursor: number | null }>('/tasks', {
+    params: { before },
+  })
+  if (!Array.isArray(data?.items)) throw new Error('历史会话列表不可用')
+  return data
+}
+
 export async function createTask(title: string): Promise<TaskCreated> {
   const { data } = await http.post<TaskCreated>('/tasks', { title })
   return data

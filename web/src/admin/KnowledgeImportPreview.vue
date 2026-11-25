@@ -4,7 +4,7 @@ import { ArrowLeft, ChevronDown, FileText, FileUp } from 'lucide-vue-next'
 import { useRouter } from 'vue-router'
 import { maxMarkdownBytes, previewMarkdown, saveKnowledgeDraft, type KnowledgeImportPreview } from '../api/admin'
 import { documentTypeLabels, versionLabels } from './knowledgeLabels'
-import AdminPagination from './AdminPagination.vue'
+import PaginationBar from '../components/PaginationBar.vue'
 
 const selectedFile = shallowRef<File>()
 const result = shallowRef<KnowledgeImportPreview>()
@@ -105,7 +105,7 @@ async function saveDraft() {
     <div v-if="issue" class="admin-form-error" role="alert">
       {{ issue }}
       <RouterLink v-if="signIn" class="admin-text-link"
-                  :to="{ name: 'admin-login', query: { next: $route.fullPath } }">重新登录</RouterLink>
+                  :to="{ name: 'admin-login' }">重新登录</RouterLink>
     </div>
   </form>
   <template v-if="result">
@@ -163,7 +163,7 @@ async function saveDraft() {
         </summary>
         <p class="admin-chunk-text">{{ chunk.content }}</p>
       </details>
-      <AdminPagination v-if="chunks.length > pageSize" :page="page + 1" :total-pages="Math.ceil(chunks.length / pageSize)"
+      <PaginationBar v-if="chunks.length > pageSize" :page="page + 1" :total-pages="Math.ceil(chunks.length / pageSize)"
         @change="page = $event - 1" />
     </section>
   </template>

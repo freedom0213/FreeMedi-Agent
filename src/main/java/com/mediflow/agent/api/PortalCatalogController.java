@@ -8,7 +8,6 @@ import com.mediflow.agent.appointment.AvailableSlot;
 import com.mediflow.agent.appointment.MySqlHospitalDirectory;
 import com.mediflow.agent.appointment.SlotCriteria;
 import com.mediflow.agent.appointment.SlotQueryService;
-import com.mediflow.agent.appointment.SlotSearch;
 
 import org.springframework.context.annotation.Profile;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -23,7 +22,8 @@ import org.springframework.web.bind.annotation.RestController;
 @Profile("mysql")
 public class PortalCatalogController {
 
-    public record SlotSearchResponse(List<AvailableSlot> slots, int count, String searchEndDate) {
+    public record SlotSearchResponse(List<AvailableSlot> slots, int count, String searchEndDate,
+                                     String searchStartDate, int page, int totalCount, int totalPages) {
     }
 
     private final MySqlHospitalDirectory directory;
@@ -32,6 +32,14 @@ public class PortalCatalogController {
     public PortalCatalogController(MySqlHospitalDirectory directory, SlotQueryService slotQuery) {
         this.directory = directory;
         this.slotQuery = slotQuery;
+    }
+
+    public record SearchWindow(LocalDate searchStartDate, LocalDate searchEndDate) {}
+
+    @GetMapping("/slots/window")
+    public SearchWindow searchWindow() {
+        LocalDate today = slotQuery.today();
+        return new SearchWindow(today, SlotQueryService.patientWindowEnd(today));
     }
 
     @GetMapping("/departments")
@@ -54,7 +62,9 @@ public class PortalCatalogController {
                                     @RequestParam(required = false) Long doctorId,
                                     @RequestParam(required = false) String date,
                                     @RequestParam(required = false) String period,
-                                    @RequestParam(required = false) Integer limit) {
+                                    @RequestParam(required = false) Integer limit,
+                                    @RequestParam(defaultValue = "1") int page) {
+        if (page < 1) throw new IllegalArgumentException("页码必须大于 0");
         if (departmentId == null && doctorId == null) {
             throw new IllegalArgumentException("请先选择科室或医生");
         }
@@ -65,8 +75,9 @@ public class PortalCatalogController {
                 date == null || date.isBlank() ? null : AppointmentDateParser.parse(date.trim(), today),
                 SlotQueryService.normalisePeriod(period),
                 limit(limit));
-        SlotSearch search = slotQuery.searchStrict(criteria);
-        return new SlotSearchResponse(search.slots(), search.count(), search.searchEndDate().toString());
+        var search = slotQuery.searchPortal(criteria, page);
+        return new SlotSearchResponse(search.slots(), search.slots().size(), search.endDate().toString(),
+                search.startDate().toString(), search.page(), search.totalCount(), search.totalPages());
     }
 
     private static int limit(Integer limit) {

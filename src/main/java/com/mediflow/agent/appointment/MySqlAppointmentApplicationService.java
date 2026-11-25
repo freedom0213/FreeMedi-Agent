@@ -57,7 +57,7 @@ public final class MySqlAppointmentApplicationService implements AppointmentAppl
         return switch (result.outcome()) {
             case CREATED -> AppointmentExecutionResult.success(result.appointmentNo());
             case EXISTING -> AppointmentExecutionResult.existing(result.appointmentNo());
-            case REJECTED -> AppointmentExecutionResult.failure(result.code(), result.message());
+            case REJECTED -> new AppointmentExecutionResult(false, result.appointmentNo(), result.code(), result.message());
         };
     }
 
@@ -65,6 +65,6 @@ public final class MySqlAppointmentApplicationService implements AppointmentAppl
     public AppointmentVerificationResult verify(String appointmentId, Principal principal) {
         AppointmentWriteService.VerificationResult result =
                 writeService.verify(appointmentId, principal == null ? 0 : principal.userId());
-        return new AppointmentVerificationResult(result.success(), result.message());
+        return new AppointmentVerificationResult(result.success(), result.message(), result.code());
     }
 }

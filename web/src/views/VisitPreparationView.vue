@@ -19,10 +19,29 @@ const messageKey = (id: string) => `freemedi-visit-message:${id}`
 const route = useRoute()
 const router = useRouter()
 const appointmentNo = computed(() => String(route.params.appointmentNo ?? ''))
-const appointmentDetail = computed(() => ({
-  name: 'appointments',
-  query: { appointmentNo: appointmentNo.value },
-}))
+const previousAppointmentRoute = computed(() => {
+  // Track the active route so a reused preparation page reads its own history entry.
+  const current = route.fullPath
+  const previous = router.options.history.state.back
+  if (typeof previous !== 'string' || previous === current) return undefined
+  const resolved = router.resolve(previous)
+  if (resolved.name === 'appointments' && (!resolved.query.appointmentNo || resolved.query.appointmentNo === appointmentNo.value)) {
+    return resolved
+  }
+})
+const returnToList = computed(() => route.query.from === 'list'
+  || (route.query.from !== 'detail' && !!previousAppointmentRoute.value && !previousAppointmentRoute.value.query.appointmentNo))
+const returnRoute = computed(() => {
+  const query = route.query.from === 'list' || route.query.from === 'detail' ? route.query : previousAppointmentRoute.value?.query
+  return {
+    name: 'appointments',
+    query: {
+      upcomingPage: typeof query?.upcomingPage === 'string' ? query.upcomingPage : undefined,
+      historyPage: typeof query?.historyPage === 'string' ? query.historyPage : undefined,
+      appointmentNo: returnToList.value ? undefined : appointmentNo.value,
+    },
+  }
+})
 const task = ref<TaskSnapshot | null>(null)
 const taskId = ref('')
 const loading = ref(false)
@@ -101,15 +120,12 @@ function isUnavailable(turn: TaskTurn) {
 function returnToAppointment(event: MouseEvent) {
   if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
   event.preventDefault()
-  const previous = router.options.history.state.back
-  if (typeof previous === 'string') {
-    const detail = router.resolve(previous)
-    if (detail.name === 'appointments' && detail.query.appointmentNo === appointmentNo.value) {
-      router.back()
-      return
-    }
+  const target = router.resolve(returnRoute.value)
+  if (previousAppointmentRoute.value?.fullPath === target.fullPath) {
+    router.back()
+    return
   }
-  void router.replace(appointmentDetail.value)
+  void router.replace(target)
 }
 
 async function ask(text = question.value) {
@@ -159,8 +175,8 @@ async function ask(text = question.value) {
 <template>
   <AppShell class="visit-frame">
     <div class="visit-page page-wrap">
-      <a class="visit-back" :href="router.resolve(appointmentDetail).href" @click="returnToAppointment">
-        <ArrowLeft :size="16" aria-hidden="true" />返回原预约
+      <a class="visit-back" :href="router.resolve(returnRoute).href" @click="returnToAppointment">
+        <ArrowLeft :size="16" aria-hidden="true" />{{ returnToList ? '返回我的预约' : '返回预约详情' }}
       </a>
       <h1>就诊准备</h1>
 

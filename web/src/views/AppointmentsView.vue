@@ -1,70 +1,93 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
-import { ArrowLeft, ArrowRight, CalendarDays, ChevronRight, CircleHelp, LoaderCircle, RefreshCw } from 'lucide-vue-next'
+import { useRoute, useRouter } from 'vue-router'
+import { ArrowLeft, ArrowRight, CalendarDays, ChevronRight, CircleHelp, ClipboardList, Copy, LoaderCircle, RefreshCw } from 'lucide-vue-next'
 import AppShell from '../components/AppShell.vue'
+import PaginationBar from '../components/PaginationBar.vue'
+import consultationArt from '../assets/home-consultation.webp'
+import { patientSession } from '../api/auth'
 import { errorMessage } from '../api/http'
-import { channelLabel, formatAppointmentDate, getAppointment, listMyAppointments } from '../api/portal'
-import type { AppointmentRecord } from '../types/portal'
+import { cancelAppointment, channelLabel, formatAppointmentDate, formatHospitalDateTime, getAppointment, readAppointmentOverview } from '../api/portal'
+import { readPending, rescheduleSubmissionKey } from '../stores/pending'
+import type { AppointmentOverview, AppointmentRecord } from '../types/portal'
 
 const route = useRoute()
+const router = useRouter()
 const requested = computed(() => typeof route.query.appointmentNo === 'string' ? route.query.appointmentNo : '')
-const records = ref<AppointmentRecord[]>([])
+const overview = ref<AppointmentOverview>()
+const upcomingPage = computed(() => readPage(route.query.upcomingPage))
+const historyPage = computed(() => readPage(route.query.historyPage))
+const recordCount = computed(() => Number(!!overview.value?.next) + (overview.value?.upcoming.totalCount ?? 0) + (overview.value?.history.totalCount ?? 0))
 const selected = ref<AppointmentRecord | null>(null)
+const pendingReschedule = computed(() => {
+  const record = selected.value
+  const patient = patientSession.value
+  return !!(record && patient && !record.replacementAppointmentNo
+    && readPending(rescheduleSubmissionKey(patient.patientId, record.appointmentNo)))
+})
 const loading = ref(true)
 const error = ref('')
+const copyStatus = ref('')
+const cancelAsk = ref(false)
+const cancelBusy = ref(false)
+const changeNotice = ref('')
+const cancelProblem = ref('')
 const heading = ref<HTMLElement | null>(null)
-const now = ref(new Date())
 let requestId = 0
 
-const hospitalClock = new Intl.DateTimeFormat('sv-SE', {
-  dateStyle: 'short', timeStyle: 'short', timeZone: 'Asia/Shanghai',
-})
 const weekday = new Intl.DateTimeFormat('zh-CN', { weekday: 'short', timeZone: 'UTC' })
 
-const groups = computed(() => {
-  const currentTime = hospitalClock.format(now.value)
-  const chronological = [...records.value].sort((first, second) => visitStart(first).localeCompare(visitStart(second)))
-  const upcoming: AppointmentRecord[] = []
-  const history: AppointmentRecord[] = []
-  for (const record of chronological) {
-    if (record.status === 'BOOKED' && visitStart(record) >= currentTime) upcoming.push(record)
-    else history.push(record)
-  }
-  return { next: upcoming[0], upcoming: upcoming.slice(1), history: history.reverse() }
-})
+function readPage(value: unknown) {
+  const page = typeof value === 'string' ? Number(value) : NaN
+  return Number.isInteger(page) && page > 0 && page <= 2_147_483_647 ? page : 1
+}
 
-watch(requested, (_, previous) => {
-  void load()
-  if (previous !== undefined) void nextTick(() => heading.value?.focus())
+const pageQuery = computed(() => ({
+  upcomingPage: upcomingPage.value > 1 ? upcomingPage.value : undefined,
+  historyPage: historyPage.value > 1 ? historyPage.value : undefined,
+}))
+
+watch([requested, upcomingPage, historyPage], async ([number, upcoming, history], previous) => {
+  if (number !== previous[0]) {
+    cancelAsk.value = false
+    changeNotice.value = ''
+    cancelProblem.value = ''
+  }
+  const pending = load()
+  if (previous.length && number !== previous[0]) void nextTick(() => heading.value?.focus())
+  await pending
+  if (number || !previous.length || previous[0] || error.value || loading.value
+      || upcomingPage.value !== upcoming || historyPage.value !== history || requested.value) return
+  const group = upcoming !== previous[1] ? 'upcoming' : history !== previous[2] ? 'history' : undefined
+  if (group) void nextTick(() => document.getElementById('appointments-' + group)?.scrollIntoView())
 }, { immediate: true })
+
+function goPage(section: 'upcoming' | 'history', page: number) {
+  void router.replace({ name: 'appointments', query: {
+    ...pageQuery.value, [section + 'Page']: page > 1 ? page : undefined,
+  } })
+}
 
 async function load() {
   const id = ++requestId
   const number = requested.value
   loading.value = true
   error.value = ''
+  copyStatus.value = ''
   selected.value = null
   try {
     if (number) {
       const detail = await getAppointment(number)
       if (id === requestId) selected.value = detail
     } else {
-      const list = await listMyAppointments()
-      if (id === requestId) {
-        records.value = list
-        now.value = new Date()
-      }
+      const result = await readAppointmentOverview(upcomingPage.value, historyPage.value)
+      if (id === requestId) overview.value = result
     }
   } catch (failure) {
     if (id === requestId) error.value = errorMessage(failure)
   } finally {
     if (id === requestId) loading.value = false
   }
-}
-
-function visitStart(record: AppointmentRecord) {
-  return record.appointmentDate + ' ' + record.timeRange.slice(0, 5)
 }
 
 function shortWeekday(date: string) {
@@ -76,22 +99,57 @@ function dateNumber(date: string, part: number) {
 }
 
 function detailRoute(record: AppointmentRecord) {
-  return { name: 'appointments', query: { appointmentNo: record.appointmentNo } }
+  return appointmentDetail(record.appointmentNo)
 }
 
-function preparationRoute(record: AppointmentRecord) {
-  return { name: 'visit-preparation', params: { appointmentNo: record.appointmentNo } }
+function appointmentDetail(appointmentNo: string) {
+  return { name: 'appointments', query: { ...pageQuery.value, appointmentNo } }
+}
+
+function preparationRoute(record: AppointmentRecord, from: 'list' | 'detail') {
+  return { name: 'visit-preparation', params: { appointmentNo: record.appointmentNo }, query: { ...pageQuery.value, from } }
+}
+
+async function copyAppointmentNumber(number: string) {
+  try {
+    await navigator.clipboard.writeText(number)
+    copyStatus.value = '已复制'
+  } catch {
+    copyStatus.value = '复制失败，请选择编号手动复制。'
+  }
+}
+
+async function confirmCancel() {
+  const number = selected.value?.appointmentNo
+  if (!number || cancelBusy.value) return
+  cancelBusy.value = true
+  cancelProblem.value = ''
+  try {
+    const result = await cancelAppointment(number)
+    if (requested.value !== number) return
+    cancelAsk.value = false
+    changeNotice.value = result.message
+    await load()
+  } catch (failure) {
+    if (requested.value !== number) return
+    cancelAsk.value = false
+    cancelProblem.value = errorMessage(failure)
+    await load()
+  } finally {
+    cancelBusy.value = false
+  }
 }
 
 function statusLabel(status: string): string {
-  return ({ BOOKED: '已预约', CANCELLED: '已取消' } as Record<string, string>)[status] ?? status
+  return ({ BOOKED: '已预约', CHECKED_IN: '已签到', CANCELLED: '已取消', EXPIRED: '已过期',
+    RESCHEDULED: '已改约' } as Record<string, string>)[status] ?? status
 }
 </script>
 
 <template>
-  <AppShell class="appointments-frame">
+  <AppShell class="appointments-frame" :class="{ 'appointments-brief': !loading && !error && (selected || recordCount < 4) }">
     <div class="appointments-page page-wrap">
-      <RouterLink v-if="requested" class="appointments-back" :to="{ name: 'appointments' }">
+      <RouterLink v-if="requested" class="appointments-back" :to="{ name: 'appointments', query: pageQuery }">
         <ArrowLeft :size="16" aria-hidden="true" /> 返回预约列表
       </RouterLink>
       <header class="appointments-header">
@@ -109,84 +167,172 @@ function statusLabel(status: string): string {
         <button class="button-secondary" type="button" @click="load">重新读取</button>
       </div>
 
-      <article v-else-if="selected" class="appointment-detail" aria-label="本次预约">
-        <header class="appointment-detail-time">
-          <div>
-            <time :datetime="selected.appointmentDate">{{ formatAppointmentDate(selected.appointmentDate) }}</time>
-            <p class="appointment-time">{{ selected.timeRange }}</p>
-          </div>
-          <span class="appointment-status" :data-status="selected.status">{{ statusLabel(selected.status) }}</span>
-        </header>
-        <dl class="appointment-metadata">
-          <div><dt>科室</dt><dd>{{ selected.departmentName }}</dd></div>
-          <div>
-            <dt>医生</dt>
-            <dd>{{ selected.doctorName }}<template v-if="selected.doctorTitle"> · {{ selected.doctorTitle }}</template></dd>
-          </div>
-          <div><dt>预约编号</dt><dd class="appointment-number">{{ selected.appointmentNo }}</dd></div>
-          <div><dt>预约方式</dt><dd>{{ channelLabel(selected.bookedVia) }}</dd></div>
-        </dl>
-        <footer v-if="selected.status === 'BOOKED'" class="appointment-detail-actions">
-          <RouterLink class="button-primary" :to="preparationRoute(selected)">
-            就诊准备 <ArrowRight :size="16" aria-hidden="true" />
-          </RouterLink>
-        </footer>
-      </article>
-
-      <div v-else-if="records.length" class="appointment-list">
-        <section v-if="groups.next" aria-labelledby="next-appointment-title">
-          <h2 id="next-appointment-title">下一次就诊</h2>
-          <div class="next-appointment">
-            <time class="appointment-date-plate" :datetime="groups.next.appointmentDate">
-              <span>{{ dateNumber(groups.next.appointmentDate, 1) }} 月</span>
-              <strong>{{ dateNumber(groups.next.appointmentDate, 2) }}</strong>
-              <span>{{ shortWeekday(groups.next.appointmentDate) }}</span>
-            </time>
-            <div class="next-appointment-copy">
-              <p class="appointment-time">{{ groups.next.timeRange }}</p>
-              <p class="next-appointment-doctor">{{ groups.next.departmentName }} · {{ groups.next.doctorName }}<template
-                v-if="groups.next.doctorTitle"> · {{ groups.next.doctorTitle }}</template>
-              </p>
-              <span class="appointment-status" :data-status="groups.next.status">{{ statusLabel(groups.next.status) }}</span>
+      <div v-else-if="selected" class="appointment-columns">
+        <article class="appointment-detail" aria-label="预约凭证">
+          <header class="appointment-detail-time">
+            <div>
+              <h2>预约凭证</h2>
+              <time :datetime="selected.appointmentDate">{{ formatAppointmentDate(selected.appointmentDate) }}</time>
+              <p class="appointment-time">{{ selected.timeRange }}</p>
             </div>
-            <div class="next-appointment-actions">
-              <RouterLink class="button-primary" :to="preparationRoute(groups.next)">
+            <span class="appointment-status" :data-status="selected.status">{{ statusLabel(selected.status) }}</span>
+          </header>
+          <dl class="appointment-metadata">
+            <div><dt>科室</dt><dd>{{ selected.departmentName }}</dd></div>
+            <div>
+              <dt>医生</dt>
+              <dd>{{ selected.doctorName }}<template v-if="selected.doctorTitle"> · {{ selected.doctorTitle }}</template></dd>
+            </div>
+            <div><dt>预约方式</dt><dd>{{ channelLabel(selected.bookedVia) }}</dd></div>
+            <div v-if="selected.checkedInAt"><dt>签到时间</dt><dd>{{ formatHospitalDateTime(selected.checkedInAt) }}</dd></div>
+            <div v-if="selected.cancelledAt"><dt>取消时间</dt><dd>{{ formatHospitalDateTime(selected.cancelledAt) }}</dd></div>
+            <div v-if="selected.originalAppointmentNo"><dt>改约来源</dt>
+              <dd><RouterLink :to="appointmentDetail(selected.originalAppointmentNo)">查看改约前的预约</RouterLink></dd>
+            </div>
+            <div class="appointment-number-line">
+              <dt>预约编号</dt>
+              <dd>
+                <span class="appointment-number">{{ selected.appointmentNo }}</span>
+                <button class="button-secondary" type="button" aria-label="复制预约编号" @click="copyAppointmentNumber(selected.appointmentNo)">
+                  <Copy :size="14" aria-hidden="true" /> 复制
+                </button>
+                <span v-if="copyStatus" class="appointment-copy-status" role="status">{{ copyStatus }}</span>
+              </dd>
+            </div>
+          </dl>
+        </article>
+        <aside class="appointment-support" aria-labelledby="appointment-support-title">
+          <img :src="consultationArt" alt="" width="1536" height="1024" />
+          <div class="appointment-support-copy">
+            <h2 id="appointment-support-title">{{ selected.status === 'RESCHEDULED' ? '改约结果'
+              : selected.status === 'CHECKED_IN' ? '到院签到' : selected.status === 'BOOKED' ? '就诊准备' : '再次预约' }}</h2>
+            <template v-if="selected.status === 'BOOKED'">
+              <p>到院后请出示预约凭证，由门诊分诊台办理签到。其他准备事项可在下方咨询。</p>
+              <RouterLink class="button-primary" :to="preparationRoute(selected, 'detail')">
                 就诊准备 <ArrowRight :size="16" aria-hidden="true" />
               </RouterLink>
-              <RouterLink class="button-secondary" :to="detailRoute(groups.next)">查看详情</RouterLink>
-            </div>
-          </div>
-        </section>
-        <section v-else class="no-next-appointment" aria-labelledby="next-appointment-title">
-          <div><h2 id="next-appointment-title">下一次就诊</h2><p>目前没有待就诊的预约。</p></div>
-          <RouterLink class="button-secondary" :to="{ name: 'booking' }">去预约挂号</RouterLink>
-        </section>
-
-        <section v-for="group in [{ id: 'upcoming', title: '其他待就诊预约', entries: groups.upcoming },
-          { id: 'history', title: '历史记录', entries: groups.history }]"
-          v-show="group.entries.length" :key="group.id" :aria-labelledby="'appointments-' + group.id">
-          <h2 :id="'appointments-' + group.id">{{ group.title }}</h2>
-          <ul class="appointment-rows">
-            <li v-for="record in group.entries" :key="record.appointmentNo">
-              <RouterLink class="appointment-row" :to="detailRoute(record)">
-                <time :datetime="record.appointmentDate" class="appointment-row-date">
-                  <strong>{{ dateNumber(record.appointmentDate, 1) }}.{{ dateNumber(record.appointmentDate, 2) }}</strong>
-                  <span>{{ shortWeekday(record.appointmentDate) }}</span>
-                </time>
-                <span class="appointment-row-copy">
-                  <strong>{{ record.timeRange }}</strong>
-                  <span>{{ record.departmentName }} · {{ record.doctorName }}<template
-                    v-if="record.doctorTitle"> · {{ record.doctorTitle }}</template></span>
-                </span>
-                <span class="appointment-status" :data-status="record.status">{{ statusLabel(record.status) }}</span>
-                <ChevronRight :size="16" class="appointment-row-arrow" aria-hidden="true" />
+            </template>
+            <template v-else-if="selected.status === 'CHECKED_IN'">
+              <p>已签到，请在诊区候诊。如需处理预约，请联系分诊台。</p>
+            </template>
+            <template v-else-if="selected.replacementAppointmentNo">
+              <p>这笔预约已改约，请查看新的就诊时间和预约凭证。</p>
+              <RouterLink class="button-primary" :to="appointmentDetail(selected.replacementAppointmentNo)">
+                查看新预约 <ArrowRight :size="16" aria-hidden="true" />
               </RouterLink>
-            </li>
-          </ul>
+            </template>
+            <template v-else>
+              <p v-if="selected.status === 'EXPIRED'">本次就诊时段已结束。如需就诊，可重新挂号。</p>
+              <p v-else>可以按本科室重新查询可预约时间。</p>
+              <RouterLink class="button-secondary" :to="{ name: 'booking', query: { departmentId: selected.departmentId } }">
+                查看可预约时间 <ArrowRight :size="16" aria-hidden="true" />
+              </RouterLink>
+            </template>
+          </div>
+        </aside>
+        <section v-if="selected.status === 'BOOKED' || changeNotice || cancelProblem || pendingReschedule"
+          class="appointment-management" aria-label="预约操作">
+          <p v-if="changeNotice" role="status">{{ changeNotice }}</p>
+          <p v-if="cancelProblem" role="alert" class="cancel-problem">{{ cancelProblem }}</p>
+          <template v-if="selected.status === 'BOOKED' && selected.cancellationDeadline">
+            <p v-if="selected.canCancel">线上取消截止至 {{ formatHospitalDateTime(selected.cancellationDeadline) }}（北京时间），改约沿用同一截止时间。</p>
+            <p v-else>已过线上取消及改约时间，如需处理请联系门诊分诊台。</p>
+            <div v-if="selected.canCancel && !cancelAsk && !pendingReschedule" class="cancel-actions">
+              <button class="button-secondary cancel-appointment" type="button" @click="cancelAsk = true">取消预约</button>
+              <RouterLink class="button-secondary" :to="{ name: 'appointment-reschedule', params: { appointmentNo: selected.appointmentNo }, query: pageQuery }">
+                改约
+              </RouterLink>
+            </div>
+            <div v-if="cancelAsk" class="cancel-confirmation" role="group" aria-label="核对取消预约">
+              <p><strong>确认取消这笔预约？</strong></p>
+              <p>{{ selected.departmentName }} · {{ selected.doctorName }} · {{ formatAppointmentDate(selected.appointmentDate) }} {{ selected.timeRange }}</p>
+              <div class="cancel-actions">
+                <button class="button-primary cancel-action" type="button" :disabled="cancelBusy" @click="confirmCancel">
+                  {{ cancelBusy ? '正在取消…' : '确认取消预约' }}
+                </button>
+                <button class="button-secondary" type="button" :disabled="cancelBusy" @click="cancelAsk = false">保留预约</button>
+              </div>
+            </div>
+          </template>
+          <RouterLink v-if="pendingReschedule" class="button-secondary"
+            :to="{ name: 'appointment-reschedule', params: { appointmentNo: selected.appointmentNo }, query: pageQuery }">
+            核验改约
+          </RouterLink>
         </section>
       </div>
 
+      <div v-else-if="overview && recordCount" class="appointment-columns">
+        <div class="appointment-list">
+          <section v-if="overview.next" aria-labelledby="next-appointment-title">
+            <h2 id="next-appointment-title">下一次就诊</h2>
+            <div class="next-appointment">
+              <time class="appointment-date-plate" :datetime="overview.next.appointmentDate">
+                <span>{{ dateNumber(overview.next.appointmentDate, 1) }} 月</span>
+                <strong>{{ dateNumber(overview.next.appointmentDate, 2) }}</strong>
+                <span>{{ shortWeekday(overview.next.appointmentDate) }}</span>
+              </time>
+              <div class="next-appointment-copy">
+                <p class="appointment-time">{{ overview.next.timeRange }}</p>
+                <p class="next-appointment-doctor">{{ overview.next.departmentName }} · {{ overview.next.doctorName }}<template
+                  v-if="overview.next.doctorTitle"> · {{ overview.next.doctorTitle }}</template>
+                </p>
+                <span class="appointment-status" :data-status="overview.next.status">{{ statusLabel(overview.next.status) }}</span>
+              </div>
+              <div class="next-appointment-actions">
+                <RouterLink v-if="overview.next.status === 'BOOKED'" class="button-primary" :to="preparationRoute(overview.next, 'list')">
+                  就诊准备 <ArrowRight :size="16" aria-hidden="true" />
+                </RouterLink>
+                <RouterLink class="button-secondary" :to="detailRoute(overview.next)">查看详情</RouterLink>
+              </div>
+            </div>
+          </section>
+          <section v-else class="no-next-appointment" aria-labelledby="next-appointment-title">
+            <div><h2 id="next-appointment-title">下一次就诊</h2><p>目前没有待就诊的预约。</p></div>
+            <RouterLink class="button-secondary" :to="{ name: 'booking' }">去预约挂号</RouterLink>
+          </section>
+
+          <section v-for="group in [{ id: 'upcoming' as const, title: '其他待就诊预约', page: overview.upcoming },
+            { id: 'history' as const, title: '历史记录', page: overview.history }]"
+            v-show="group.page.totalCount" :key="group.id" :aria-labelledby="'appointments-' + group.id">
+            <h2 :id="'appointments-' + group.id">{{ group.title }}</h2>
+            <ul class="appointment-rows">
+              <li v-for="record in group.page.items" :key="record.appointmentNo">
+                <RouterLink class="appointment-row" :to="detailRoute(record)">
+                  <time :datetime="record.appointmentDate" class="appointment-row-date">
+                    <strong>{{ dateNumber(record.appointmentDate, 1) }}.{{ dateNumber(record.appointmentDate, 2) }}</strong>
+                    <span>{{ shortWeekday(record.appointmentDate) }}</span>
+                  </time>
+                  <span class="appointment-row-copy">
+                    <strong>{{ record.timeRange }}</strong>
+                    <span>{{ record.departmentName }} · {{ record.doctorName }}<template
+                      v-if="record.doctorTitle"> · {{ record.doctorTitle }}</template></span>
+                  </span>
+                  <span class="appointment-status" :data-status="record.status">{{ statusLabel(record.status) }}</span>
+                  <ChevronRight :size="16" class="appointment-row-arrow" aria-hidden="true" />
+                </RouterLink>
+              </li>
+            </ul>
+            <PaginationBar v-if="group.page.totalPages > 1" class="appointment-pagination" :label="group.title + '分页'"
+              :page="group.page.page" :total-pages="group.page.totalPages" @change="goPage(group.id, $event)" />
+          </section>
+        </div>
+        <aside class="appointment-support" aria-labelledby="appointment-overview-title">
+          <img :src="consultationArt" alt="" width="1536" height="1024" />
+          <div class="appointment-support-copy">
+            <h2 id="appointment-overview-title"><ClipboardList :size="20" aria-hidden="true" /> 预约记录</h2>
+            <dl class="appointment-overview">
+              <div><dt>待就诊</dt><dd>{{ overview.upcoming.totalCount + Number(!!overview.next) }} 笔</dd></div>
+              <div><dt>历史记录</dt><dd>{{ overview.history.totalCount }} 笔</dd></div>
+            </dl>
+            <RouterLink v-if="overview.next" class="button-secondary" :to="{ name: 'booking' }">
+              预约挂号 <ArrowRight :size="16" aria-hidden="true" />
+            </RouterLink>
+          </div>
+        </aside>
+      </div>
+
       <section v-else class="appointments-empty" aria-labelledby="appointments-empty-title">
+        <img class="appointments-empty-art" :src="consultationArt" alt="" width="1536" height="1024" />
         <div class="appointments-empty-icon"><CalendarDays :size="32" :stroke-width="1.6" aria-hidden="true" /></div>
         <h2 id="appointments-empty-title">还没有预约</h2>
         <p>选好就诊时间并确认后，就能在这里查看预约和就诊准备。</p>
@@ -209,7 +355,7 @@ function statusLabel(status: string): string {
   border-color: #ccdbe8;
 }
 .appointments-frame :deep(.site-footer) { margin-top: 0; }
-.appointments-page { width: min(960px, calc(100% - 48px)); padding-block: clamp(22px, 4vh, 46px); }
+.appointments-page { width: min(1200px, calc(100% - 48px)); padding-block: clamp(22px, 4vh, 46px); }
 .appointments-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin-bottom: 20px; }
 .appointments-header h1 { margin: 0; font-size: clamp(27px, 3vw, 38px); letter-spacing: -.025em; }
 .appointments-back {
@@ -224,7 +370,19 @@ function statusLabel(status: string): string {
 }
 .appointments-back:hover { text-decoration: underline; text-underline-offset: 3px; }
 .appointments-page h2 { margin: 0; font-size: 18px; }
+.appointment-columns { display: grid; align-items: start; grid-template-columns: minmax(0, 1fr) minmax(230px, 31%); gap: 18px; }
+.appointment-support { min-width: 0; overflow: hidden; border: 1px solid #cedeec; border-radius: 15px; background: #eef5fb; }
+.appointment-support img { display: block; width: 100%; height: clamp(122px, 20vh, 200px); object-fit: cover; object-position: 69% 15%; }
+.appointment-support-copy { padding: clamp(14px, 2vw, 22px); }
+.appointment-support h2 { display: flex; align-items: center; gap: 7px; color: #284a76; }
+.appointment-support p { margin: 8px 0 14px; color: #3b5574; font-size: 14px; }
+.appointment-overview { display: grid; gap: 5px; padding: 0 0 12px; margin: 10px 0 0; }
+.appointment-overview div { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+.appointment-overview dt { font-size: 14px; color: #3b5574; }
+.appointment-overview dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 700; }
 .appointment-list { display: grid; gap: 24px; }
+.appointment-pagination { --pagination-border: var(--brand-line); --pagination-ink: var(--brand-ink);
+  --pagination-active: var(--brand-plum); --pagination-muted: var(--brand-muted); margin-top: 12px; }
 .appointment-list section > h2 { margin-bottom: 8px; }
 .next-appointment {
   display: grid;
@@ -285,6 +443,15 @@ function statusLabel(status: string): string {
 .appointment-row-copy { overflow-wrap: anywhere; }
 .appointment-row-copy strong { font-size: 15px; }
 .appointment-row-arrow { color: var(--brand-plum); }
+.appointment-management { grid-column: 1 / -1; color: var(--brand-muted); font-size: 14px; }
+.appointment-management:empty { display: none; }
+.appointment-management > p { margin: 0 0 9px; }
+.cancel-problem, .cancel-appointment { color: #853c39; }
+.cancel-confirmation { padding: 13px; border-radius: 10px; border: 1px solid #e8d1ce; background: #fff8f7; }
+.cancel-confirmation p { margin: 0 0 9px; }
+.cancel-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.cancel-action { background: #913f3c; }
+.appointment-status[data-status="CHECKED_IN"] { background: #e5effb; border-color: #cbdced; color: #244f74; }
 .no-next-appointment, .appointments-notice, .appointments-empty, .appointment-detail {
   border: 1px solid #dbe3ee;
   border-radius: 15px;
@@ -313,6 +480,7 @@ function statusLabel(status: string): string {
   background: linear-gradient(114deg, #eee4f3, #faebe8);
   color: var(--brand-plum);
 }
+.appointment-detail-time h2 { margin-bottom: 10px; }
 .appointment-detail-time time { display: block; margin-bottom: 6px; font-size: 14px; font-weight: 700; }
 .appointment-detail-time .appointment-status { align-self: start; }
 .appointment-metadata {
@@ -325,7 +493,11 @@ function statusLabel(status: string): string {
 .appointment-metadata dt { margin-bottom: 3px; color: var(--brand-muted); font-size: 13px; }
 .appointment-metadata dd { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
 .appointment-number { font-variant-numeric: tabular-nums; }
-.appointment-detail-actions { padding: 12px clamp(15px, 3vw, 25px); border-top: 1px solid var(--brand-line); }
+.appointment-number-line { grid-column: 1 / -1; padding-top: 12px; border-top: 1px dashed var(--brand-line); }
+.appointment-number-line dd { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 10px; }
+.appointment-copy-status { flex-basis: 100%; color: var(--brand-muted); font-size: 13px; }
+.appointment-number-line button { min-height: 36px; }
+
 .appointments-empty { display: grid; justify-items: center; gap: 10px; padding: clamp(28px, 6vw, 60px) 14px; text-align: center; }
 .appointments-empty-icon {
   display: grid;
@@ -336,8 +508,17 @@ function statusLabel(status: string): string {
   background: #e7effb;
   color: #315991;
 }
+.appointments-empty-art { width: min(100%, 300px); height: 134px; border-radius: 11px; object-fit: cover; object-position: 72% 48%; }
 .appointments-empty p { margin: 0 0 6px; color: var(--brand-muted); font-size: 14px; }
 
+@media (min-width: 841px) {
+  .appointments-brief :deep(.patient-page-content) { display: grid; align-content: safe center; }
+}
+@media (max-width: 840px) {
+  .appointment-columns { grid-template-columns: minmax(0, 1fr); }
+  .appointment-support { display: grid; grid-template-columns: minmax(85px, 29%) minmax(0, 1fr); }
+  .appointment-support img { align-self: stretch; height: 100%; object-position: 79% 50%; }
+}
 @media (max-width: 720px) {
   .appointments-page { width: calc(100% - 24px); }
   .next-appointment { grid-template-columns: auto minmax(0, 1fr); gap: 12px; }
@@ -349,6 +530,5 @@ function statusLabel(status: string): string {
   .appointment-row-arrow { display: none; }
   .appointment-date-plate { min-width: 58px; }
   .appointment-metadata { gap: 12px; }
-  .appointment-detail-actions .button-primary { width: 100%; }
 }
 </style>

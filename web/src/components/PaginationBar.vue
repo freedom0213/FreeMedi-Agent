@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { ChevronLeft, ChevronRight } from 'lucide-vue-next'
 
-const props = defineProps<{ page: number; totalPages?: number; hasNext?: boolean; busy?: boolean }>()
+const props = defineProps<{ page: number; totalPages?: number; hasNext?: boolean; busy?: boolean; label?: string }>()
 const emit = defineEmits<{ change: [page: number] }>()
 const bar = ref<HTMLElement>()
 const last = computed(() => props.totalPages ?? props.page + Number(!!props.hasNext))
@@ -21,7 +21,7 @@ function go(page: number) {
 </script>
 
 <template>
-  <nav ref="bar" class="table-pagination" aria-label="表格分页">
+  <nav ref="bar" class="table-pagination" :aria-label="label || '表格分页'">
     <button type="button" aria-label="上一页" :disabled="busy || page <= 1" @click="go(page - 1)"><ChevronLeft :size="17" aria-hidden="true" /></button>
     <template v-for="(number, index) in pages" :key="number">
       <span v-if="index > 0 && number - (pages[index - 1] ?? 0) > 1" aria-hidden="true">…</span>
@@ -36,12 +36,12 @@ function go(page: number) {
 .table-pagination {
   position: sticky; bottom: 6px; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
   width: fit-content; max-width: calc(100% - 12px); gap: 4px; margin: 0 auto 8px; padding: 4px 6px;
-  border: 1px solid var(--admin-border); border-radius: 8px; background: #fff; box-shadow: 0 4px 15px #203b6026;
+  border: 1px solid var(--pagination-border, var(--admin-border)); border-radius: 8px; background: #fff; box-shadow: 0 4px 15px #203b6026;
 }
 .table-pagination button { display: grid; place-items: center; min-width: 34px; min-height: 36px; padding: 2px 5px;
-  border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--admin-ink); font: inherit; cursor: pointer; }
-.table-pagination button[aria-current] { background: var(--admin-blue); color: #fff; }
+  border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--pagination-ink, var(--admin-ink)); font: inherit; cursor: pointer; }
+.table-pagination button[aria-current] { background: var(--pagination-active, var(--admin-blue)); color: #fff; }
 .table-pagination button:enabled:not([aria-current]):hover { background: #ebf3ff; }
 .table-pagination button:disabled { opacity: .48; cursor: default; }
-.table-pagination span { color: var(--admin-muted); }
+.table-pagination span { color: var(--pagination-muted, var(--admin-muted)); }
 </style>

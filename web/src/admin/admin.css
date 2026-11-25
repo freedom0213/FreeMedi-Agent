@@ -251,9 +251,7 @@
 .knowledge-probe-form > label:first-child { flex-basis: 240px; max-width: 510px; }
 .knowledge-probe-form > label:nth-child(3) { max-width: 96px; }
 .knowledge-fragment-table { min-width: 855px; }
-.knowledge-inline-excerpt { min-width: 115px; }
-.knowledge-inline-excerpt summary, .knowledge-hits summary { cursor: pointer; color: var(--admin-blue-deep); }
-.knowledge-excerpt { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--admin-ink); }
+.knowledge-hits summary { cursor: pointer; color: var(--admin-blue-deep); }
 .knowledge-hits { margin: 0 16px 14px; overflow-wrap: anywhere; }
 .knowledge-hits ol { display: grid; gap: 8px; padding-left: 24px; }
 .knowledge-hits details { padding: 10px 12px; border: 1px solid var(--admin-border); border-radius: 6px; }

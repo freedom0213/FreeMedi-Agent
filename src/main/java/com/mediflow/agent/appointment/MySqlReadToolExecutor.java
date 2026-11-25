@@ -82,7 +82,10 @@ public final class MySqlReadToolExecutor implements ReadToolExecutor {
         if (!search.exactMatch() && !search.slots().isEmpty()) {
             return "原日期或时段无号，以下为同科室的替代时间，需向患者说明变化并等待确认";
         }
-        return search.slots().isEmpty() ? "未来90天的查询范围内没有可用号源" : "已找到符合条件的号源";
+        if (search.requestedDate() != null && search.requestedDate().isAfter(search.searchEndDate())) {
+            return "目前可查至 " + search.searchEndDate() + "，之后的日期未纳入查询";
+        }
+        return search.slots().isEmpty() ? "可查至 " + search.searchEndDate() + "，查询范围内暂无符合条件的号源" : "已找到符合条件的号源";
     }
 
     /**
@@ -101,14 +104,18 @@ public final class MySqlReadToolExecutor implements ReadToolExecutor {
         payload.put("appointmentDate", slot.appointmentDate().toString());
         payload.put("clinicPeriod", slot.clinicPeriod());
         payload.put("timeRange", slot.timeRange());
+        payload.put("cancellationDeadline", slot.cancellationDeadline().toString());
         return payload;
     }
 
     private Map<String, Object> rules() {
         return Map.of(
-                "advanceBookingDays", 90,
-                "cancelSupported", false,
-                "rescheduleSupported", false,
+                "advanceBookingDays", SlotQueryService.PATIENT_WINDOW_DAYS,
+                "cancelSupported", true,
+                "cancelOnlinePolicy", "就诊前一天北京时间 " + AppointmentTiming.CANCELLATION_CUTOFF + " 前，且尚未签到，可在我的预约详情确认取消。",
+                "checkInPolicy", "到院后由分诊台在预约开始前 " + AppointmentTiming.CHECK_IN_LEAD_MINUTES + " 分钟至时段结束前签到。",
+                "rescheduleSupported", true,
+                "rescheduleOnlinePolicy", "仅可在我的预约详情发起改约，与取消共用截止时间，只能更换同科室同医生的时段。新号源确认成功后才更换原预约。",
                 "confirmationRequired", true,
                 "syntheticData", true);
     }

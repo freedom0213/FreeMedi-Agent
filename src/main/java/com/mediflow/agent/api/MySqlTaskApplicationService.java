@@ -1,6 +1,8 @@
 package com.mediflow.agent.api;
 
 import java.sql.Statement;
+import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -58,6 +60,32 @@ public class MySqlTaskApplicationService {
                 "appointmentNo", appointment.appointmentNo(), "departmentName", appointment.departmentName(),
                 "doctorName", appointment.doctorName(), "appointmentDate", appointment.appointmentDate(),
                 "timeRange", appointment.timeRange(), "bookedVia", appointment.bookedVia())));
+    }
+
+    public record GuideConversation(String taskId, String title, String status, Instant updatedAt) {}
+    public record GuideHistory(List<GuideConversation> items, Long nextCursor) {}
+    private record HistoryRow(long id, GuideConversation conversation) {}
+
+    public GuideHistory guideHistory(Principal principal, Long before) {
+        if (before != null && before < 1) throw new IllegalArgumentException("无效的历史会话分页位置");
+        int pageSize = 20;
+        String sql = """
+                SELECT t.id, t.task_no, t.status, t.updated_at,
+                       COALESCE(NULLIF(LEFT(TRIM(first_turn.user_message), 64), ''),
+                                NULLIF(s.title, ''), '智能导诊与预约') AS title
+                FROM agent_task t
+                JOIN agent_session s ON s.id = t.session_id AND s.patient_id = t.patient_id
+                LEFT JOIN agent_turn first_turn ON first_turn.task_id = t.id AND first_turn.turn_no = 1
+                WHERE t.patient_id = ? AND t.task_type = 'APPOINTMENT_BOOKING'
+                """;
+        var params = before == null ? new Object[]{principal.userId(), pageSize + 1}
+                : new Object[]{principal.userId(), before, pageSize + 1};
+        if (before != null) sql += " AND t.id < ?";
+        var rows = jdbc.query(sql + " ORDER BY t.id DESC LIMIT ?", (row, index) -> new HistoryRow(row.getLong("id"),
+                new GuideConversation(row.getString("task_no"), row.getString("title"), row.getString("status"),
+                        row.getTimestamp("updated_at").toInstant())), params);
+        var items = rows.stream().limit(pageSize).map(HistoryRow::conversation).toList();
+        return new GuideHistory(items, rows.size() > pageSize ? rows.get(pageSize - 1).id() : null);
     }
 
     private long createSession(long patientId, String title) {

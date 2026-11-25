@@ -61,6 +61,7 @@ export interface SlotResult {
   appointmentDate: string
   clinicPeriod: string
   timeRange: string
+  cancellationDeadline?: string
   differences?: string[]
 }
 

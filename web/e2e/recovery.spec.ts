@@ -8,7 +8,7 @@ test('普通挂号独立恢复医生列表与号源，保留原科室和日期�
   const afternoon = page.getByRole('button', { name: '下午', exact: true })
   await date.fill(visitDate)
   await afternoon.click()
-  await expect(page.getByText('2 个号源', { exact: true })).toBeVisible()
+  await expect(page.getByText('查询范围内共 2 个号源', { exact: true })).toBeVisible()
   patientApi.failNext('GET /slots')
   await page.getByRole('button', { name: '重新查询', exact: true }).click()
   const errors = page.getByRole('alert')
@@ -23,9 +23,9 @@ test('普通挂号独立恢复医生列表与号源，保留原科室和日期�
   await expect(afternoon).toHaveAttribute('aria-pressed', 'true')
   expect(patientApi.requestsFor('GET /slots')).toHaveLength(previousSearches)
   await doctor.click()
-  await expect(page.getByText('2 个号源', { exact: true })).toBeVisible()
+  await expect(page.getByText('查询范围内共 2 个号源', { exact: true })).toBeVisible()
   expect(patientApi.requestsFor('GET /slots').at(-1)?.query).toEqual({
-    departmentId: '2002', doctorId: '3003', date: visitDate, period: 'AFTERNOON',
+    departmentId: '2002', doctorId: '3003', date: visitDate, period: 'AFTERNOON', page: '1', limit: '12',
   })
 })
 

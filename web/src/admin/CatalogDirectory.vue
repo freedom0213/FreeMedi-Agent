@@ -5,7 +5,7 @@ import {
   type CatalogKind, type CatalogOption, type DepartmentRow, type DoctorRow,
 } from '../api/admin'
 import { useCatalogPage } from './useCatalogPage'
-import AdminPagination from './AdminPagination.vue'
+import PaginationBar from '../components/PaginationBar.vue'
 
 const props = defineProps<{ kind: CatalogKind }>()
 const doctorPage = props.kind === 'doctors'
@@ -171,7 +171,7 @@ function clearFilters() {
     </section>
     <p v-if="state === 'loading'" class="admin-empty" role="status">正在读取{{ label }}…</p>
     <div v-else-if="state === 'session'" class="admin-empty" role="alert">
-      管理员会话已失效。<RouterLink :to="{ name: 'admin-login', query: { next: $route.fullPath } }">重新登录</RouterLink>
+      管理员会话已失效。<RouterLink :to="{ name: 'admin-login' }">重新登录</RouterLink>
     </div>
     <div v-else-if="state === 'failed'" class="admin-empty" role="alert">
       {{ label }}加载失败。<button class="admin-button" type="button" @click="reload">重新加载</button>
@@ -197,7 +197,7 @@ function clearFilters() {
         </tr></tbody>
       </table>
     </div>
-    <AdminPagination v-if="state === 'ready' && (filters.page > 1 || hasNext || (totalPages ?? 0) > 1)"
+    <PaginationBar v-if="state === 'ready' && (filters.page > 1 || hasNext || (totalPages ?? 0) > 1)"
       :page="filters.page" :total-pages="totalPages" :has-next="hasNext" @change="go" />
   </section>
 </template>

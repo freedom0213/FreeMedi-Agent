@@ -216,18 +216,30 @@ export const useAgentStore = defineStore('agent', () => {
     appendEvents(result.events)
   }
 
-  function startNewTask() {
-    if (pendingConfirmation.value) return
-    stopReplay?.()
-    stopReplay = undefined
-    setTaskId(null)
+  function switchTask(id: string | null) {
+    if (pendingConfirmation.value || busy.value) return
+    if (pendingMessage.value) {
+      writePending(messageKey + ':' + pendingMessage.value.taskId, pendingMessage.value)
+    }
+    stopWatching()
+    setTaskId(id)
     task.value = null
     events.value = []
     error.value = ''
     streamingReply.value = ''
     confirmationNotice.value = ''
     restoreFailed.value = false
-    setPendingMessage(null)
+    canRetryConfirmation.value = false
+    setPendingMessage(id ? readPending<MessageIntent>(messageKey + ':' + id) : null)
+    if (id) writePending(messageKey + ':' + id, null)
+  }
+
+  function startNewTask() { switchTask(null) }
+
+  async function openTask(id: string) {
+    if (pendingConfirmation.value || busy.value || id === taskId.value) return
+    switchTask(id)
+    await restore()
   }
 
   function stopWatching() {
@@ -239,7 +251,7 @@ export const useAgentStore = defineStore('agent', () => {
     taskId, task, events, busy, error, streamingReply, plan, toolResult, recommendedSlot,
     requirements, candidateBatch, restore, submitMessage, saveRequirements, chooseCandidate,
     confirmPlan, runConfirmation, pendingConfirmation, pendingMessage, canRetryConfirmation,
-    confirmationNotice, restoreFailed, startNewTask, stopWatching,
+    confirmationNotice, restoreFailed, startNewTask, openTask, stopWatching,
   }
 })
 

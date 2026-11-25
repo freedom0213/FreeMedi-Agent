@@ -49,7 +49,7 @@ async function submit() {
       <button v-if="error === 'conflict'" class="admin-button admin-button--primary" type="button" @click="emit('refresh', 'current')">查看当前版本</button>
       <button v-else-if="error === 'unknown'" class="admin-button admin-button--primary" type="button" @click="emit('refresh', 'selected')">核验下架结果</button>
       <RouterLink v-else-if="error === 'session'" class="admin-button admin-button--primary"
-                  :to="{ name: 'admin-login', query: { next: $route.fullPath } }">重新登录</RouterLink>
+                  :to="{ name: 'admin-login' }">重新登录</RouterLink>
       <button v-else class="admin-button admin-button--danger" type="button" :disabled="submitting" @click="submit">
         {{ submitting ? '正在下架…' : '确认下架' }}
       </button>

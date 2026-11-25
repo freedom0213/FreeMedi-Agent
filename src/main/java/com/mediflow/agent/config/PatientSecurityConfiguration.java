@@ -37,10 +37,11 @@ public class PatientSecurityConfiguration {
 
     @Bean
     SecurityFilterChain patientSecurityFilterChain(HttpSecurity http) throws Exception {
+        RoleSession.configure(http, "PATIENT");
         return http.authorizeHttpRequests(authorize -> authorize
                         .dispatcherTypeMatchers(ERROR).permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/v1/auth/csrf",
-                                "/api/v1/departments", "/api/v1/departments/*/doctors", "/api/v1/slots").permitAll()
+                                "/api/v1/departments", "/api/v1/departments/*/doctors", "/api/v1/slots", "/api/v1/slots/window").permitAll()
                         .requestMatchers("/api/**").hasRole("PATIENT")
                         .anyRequest().permitAll())
                 .requestCache(cache -> cache.disable())
@@ -51,7 +52,6 @@ public class PatientSecurityConfiguration {
                         .successHandler((request, response, authentication) -> response.setStatus(SC_NO_CONTENT))
                         .failureHandler((request, response, exception) -> response.setStatus(SC_UNAUTHORIZED)))
                 .logout(logout -> logout.logoutUrl("/api/v1/auth/logout")
-                        .deleteCookies("JSESSIONID")
                         .logoutSuccessHandler((request, response, authentication) -> response.setStatus(SC_NO_CONTENT)))
                 .build();
     }

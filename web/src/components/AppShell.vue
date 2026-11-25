@@ -86,7 +86,7 @@ const navItems = [
       </div>
     </header>
 
-    <main>
+    <main class="patient-page-content">
       <p v-if="logoutError" class="page-wrap" role="alert">{{ logoutError }}</p>
       <slot />
     </main>

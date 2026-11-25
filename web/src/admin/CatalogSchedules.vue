@@ -6,7 +6,7 @@ import {
   type CatalogOption, type ClinicPeriod, type ScheduleDetail, type ScheduleRow,
 } from '../api/admin'
 import { useCatalogPage } from './useCatalogPage'
-import AdminPagination from './AdminPagination.vue'
+import PaginationBar from '../components/PaginationBar.vue'
 import { hospitalDay as localDate, queryCatalogId, queryDate } from './hospitalCalendar'
 
 const route = useRoute()
@@ -252,7 +252,7 @@ async function confirmClose() {
     </section>
     <p v-if="state === 'loading'" class="admin-empty" role="status">正在读取排班…</p>
     <div v-else-if="state === 'session'" class="admin-empty" role="alert">
-      管理员会话已失效。<RouterLink :to="{ name: 'admin-login', query: { next: $route.fullPath } }">重新登录</RouterLink>
+      管理员会话已失效。<RouterLink :to="{ name: 'admin-login' }">重新登录</RouterLink>
     </div>
     <div v-else-if="state === 'failed'" class="admin-empty" role="alert">
       排班加载失败。<button class="admin-button" type="button" @click="reload">重新加载</button>
@@ -274,6 +274,10 @@ async function confirmClose() {
               <td><div class="catalog-actions">
                 <button class="admin-button" type="button" :aria-expanded="detailId === row.id"
                   @click="detailId = detailId === row.id ? undefined : row.id">{{ detailId === row.id ? '收起号源' : '查看号源' }}</button>
+                <RouterLink class="admin-text-link" :to="{ name: 'admin-appointments', query: {
+                  scheduleId: row.id, departmentId: row.departmentId, doctorId: row.doctorId,
+                  from: row.scheduleDate, to: row.scheduleDate,
+                } }">查看预约</RouterLink>
                 <button v-if="row.status === 'OPEN' && !row.booked" class="admin-button" type="button" :disabled="busy"
                   @click="requestClose(row)">关闭排班</button>
               </div><small v-if="row.status === 'OPEN' && row.booked">已有 {{ row.booked }} 笔有效预约，无法关闭</small></td>
@@ -294,7 +298,7 @@ async function confirmClose() {
         </tbody>
       </table>
     </div>
-    <AdminPagination v-if="state === 'ready' && (filters.page > 1 || hasNext || (totalPages ?? 0) > 1)"
+    <PaginationBar v-if="state === 'ready' && (filters.page > 1 || hasNext || (totalPages ?? 0) > 1)"
       :page="filters.page" :total-pages="totalPages" :has-next="hasNext" @change="go" />
   </section>
 </template>

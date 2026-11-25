@@ -17,7 +17,7 @@ const statuses = { REACHABLE: '可连接', UNAVAILABLE: '暂不可用', DISABLED
     <p v-if="state === 'loading'" class="admin-empty" role="status">正在读取向量模型和索引状态…</p>
     <p v-else-if="state === 'error'" class="admin-empty" role="alert">向量模型状态读取失败，请刷新重试。</p>
     <p v-else-if="state === 'session'" class="admin-empty" role="alert">
-      管理员会话已失效。<RouterLink :to="{ name: 'admin-login', query: { next: $route.fullPath } }">重新登录</RouterLink>
+      管理员会话已失效。<RouterLink :to="{ name: 'admin-login' }">重新登录</RouterLink>
     </p>
     <template v-else-if="data">
       <dl class="knowledge-index-facts">

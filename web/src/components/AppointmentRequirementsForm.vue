@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { listDepartments, listDoctors } from '../api/portal'
+import { formatAppointmentDate, listDepartments, listDoctors, readSlotWindow } from '../api/portal'
 import { errorMessage } from '../api/http'
 import type { Department, Doctor } from '../types/portal'
 import type { RequirementChanges, Requirements } from '../types/agent'
@@ -14,6 +14,7 @@ const doctorError = ref('')
 const loadingDepartments = ref(false)
 const loadingDoctors = ref(false)
 const doctorReload = ref(0)
+const searchWindow = ref<Awaited<ReturnType<typeof readSlotWindow>>>()
 
 function editable(value?: Requirements): Required<RequirementChanges> {
   return {
@@ -60,7 +61,12 @@ watch([() => form.value.departmentId, doctorReload], async ([id], _, onCleanup) 
   }
 }, { immediate: true })
 
-onMounted(loadDepartments)
+onMounted(() => {
+  void loadDepartments()
+  void readSlotWindow().then(window => { searchWindow.value = window }).catch(() => {
+    // The search endpoint still enforces the window if this read is unavailable.
+  })
+})
 
 async function loadDepartments() {
   if (loadingDepartments.value) return
@@ -112,7 +118,9 @@ function search() {
       </div>
       <div class="requirement-field">
         <label for="guide-date">就诊日期</label>
-        <input id="guide-date" v-model="form.appointmentDate" type="date" @change="form.dateFlexible = false" />
+        <input id="guide-date" v-model="form.appointmentDate" type="date" :min="searchWindow?.searchStartDate"
+          :max="searchWindow?.searchEndDate" @change="form.dateFlexible = false" />
+        <small v-if="searchWindow">可查至 {{ formatAppointmentDate(searchWindow.searchEndDate) }}</small>
       </div>
       <div class="requirement-field">
         <label for="guide-period">就诊时段</label>

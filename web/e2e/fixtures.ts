@@ -59,6 +59,7 @@ class PatientApi {
   private readonly bookedIntents = new Map<string, AppointmentRecord>()
   private readonly visits = new Map<string, Consultation>()
   private guide = this.newTask(guideTaskId, 'APPOINTMENT_BOOKING')
+  private readonly additionalSlots: AvailableSlot[] = []
   private dropBookingResponse = false
   private unavailableReplies = 0
 
@@ -91,6 +92,13 @@ class PatientApi {
 
   failVisitQueries(count: number) {
     this.unavailableReplies = count
+  }
+
+  seedAdditionalSlots(count: number) {
+    for (let index = 0; index < count; ++index) {
+      this.additionalSlots.push({ ...firstSlot, slotId: 7000 + index,
+        appointmentDate: '2026-11-' + (21 + Math.floor(index / 4)) })
+    }
   }
 
   seedAppointment() {
@@ -131,15 +139,22 @@ class PatientApi {
       case 'GET /auth/session': return json({ patientId: '1001', displayName: '前端演示患者' })
       case 'GET /auth/csrf': return json({ patientId: '1001', headerName: 'x-csrf-token', token: 'frontend-e2e' })
       case 'GET /departments': return json(departments)
+      case 'GET /slots/window':
+        return json({ searchStartDate: '2026-11-19', searchEndDate: '2026-12-16' })
       case 'GET /slots': {
-        const matches = slots.filter(slot => (
+        const matches = [...slots, ...this.additionalSlots].filter(slot => (
           String(slot.departmentId) === query.departmentId
           && (!query.doctorId || String(slot.doctorId) === query.doctorId)
           && (!query.date || slot.appointmentDate === query.date)
           && (!query.period || slot.clinicPeriod === query.period)
           && !this.appointments.some(record => record.slotId === slot.slotId)
         ))
-        return json({ slots: matches, count: matches.length, searchEndDate: '2026-12-03' })
+        const size = Number(query.limit || 20)
+        const totalPages = Math.ceil(matches.length / size)
+        const page = Math.min(Number(query.page || 1), totalPages || 1)
+        const entries = matches.slice((page - 1) * size, page * size)
+        return json({ slots: entries, count: entries.length, page, totalCount: matches.length, totalPages,
+          searchStartDate: '2026-11-19', searchEndDate: '2026-12-16' })
       }
       case 'POST /appointments': {
         const intent = String(body.idempotencyKey)
@@ -161,6 +176,23 @@ class PatientApi {
         return json({ success: false, outcome: null, appointmentNo: null, code: 'NOT_FOUND', message: '尚未查到预约。' })
       }
       case 'GET /appointments/mine': return json(this.appointments)
+      case 'GET /appointments/mine/overview': {
+        const start = (record: AppointmentRecord) => record.appointmentDate + ' ' + record.timeRange.slice(0, 5)
+        const sorted = [...this.appointments].sort((left, right) => start(left).localeCompare(start(right)))
+        const isUpcoming = (item: AppointmentRecord) => item.status === 'BOOKED' && start(item) >= '2026-11-19 12:30'
+        const upcoming = sorted.filter(isUpcoming)
+        const history = sorted.filter(item => !isUpcoming(item)).reverse()
+        const paginate = (items: AppointmentRecord[], requested: string | undefined) => {
+          const totalPages = Math.ceil(items.length / 20)
+          const page = Math.min(Number(requested || 1), totalPages || 1)
+          return { items: items.slice((page - 1) * 20, page * 20), totalCount: items.length, totalPages, page }
+        }
+        return json({ next: upcoming[0] ?? null,
+          upcoming: paginate(upcoming.slice(1), query.upcomingPage), history: paginate(history, query.historyPage) })
+      }
+      case 'GET /tasks':
+        return json({ items: this.guide.turns.length ? [{ taskId: guideTaskId, title: this.guide.turns[0]?.userMessage,
+          status: this.guide.status, updatedAt: '2026-11-19T04:30:00Z' }] : [], nextCursor: null })
       case 'POST /tasks': return json({ taskId: guideTaskId, status: this.guide.status })
       case 'GET /tasks/' + guideTaskId: return json(this.guide)
       case 'GET /tasks/' + guideTaskId + '/events':
@@ -199,12 +231,16 @@ class PatientApi {
     const directory = path.match(/^\/departments\/(\d+)\/doctors$/)
     if (method === 'GET' && directory) return json(doctors.filter(doctor => doctor.departmentId === Number(directory[1])))
 
-    const appointment = path.match(/^\/appointments\/([^/]+)(\/consultation)?$/)
+    const appointment = path.match(/^\/appointments\/([^/]+)(\/(?:consultation|cancel))?$/)
     if (appointment) {
       const record = this.appointments.find(item => item.appointmentNo === appointment[1])
       if (!record) return route.fulfill({ status: 404, json: { message: '找不到这笔预约。' } })
       if (method === 'GET' && !appointment[2]) return json(record)
-      if (method === 'POST' && appointment[2]) {
+      if (method === 'POST' && appointment[2] === '/cancel') {
+        Object.assign(record, { status: 'CANCELLED', canCancel: false, cancelledAt: '2026-11-19T04:30:00Z' })
+        return json({ success: true, code: null, message: '预约已取消。' })
+      }
+      if (method === 'POST' && appointment[2] === '/consultation') {
         const taskId = 'visit-' + record.appointmentNo
         if (!this.visits.has(taskId)) {
           const task = this.newTask(taskId, 'VISIT_CONSULTATION')

@@ -23,7 +23,7 @@ const { data, state, reload } = useKnowledgeRead(readKnowledgeLibrary)
       知识库加载失败。<button class="admin-button" type="button" @click="reload">重新加载</button>
     </div>
     <div v-else-if="state === 'session'" class="admin-empty" role="alert">
-      管理员会话已失效。<RouterLink :to="{ name: 'admin-login', query: { next: $route.fullPath } }">重新登录</RouterLink>
+      管理员会话已失效。<RouterLink :to="{ name: 'admin-login' }">重新登录</RouterLink>
     </div>
     <p v-else-if="!data?.length" class="admin-empty">暂无知识文档，可先从知识文档页导入。</p>
     <div v-else class="admin-table-scroll" role="region" aria-label="知识分类统计" tabindex="0">

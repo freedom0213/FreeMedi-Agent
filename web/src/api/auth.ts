@@ -14,9 +14,11 @@ interface CsrfResponse {
 
 const authHttp = axios.create({ baseURL: '/api/v1/auth', timeout: 10_000 })
 const sessionChanges = new BroadcastChannel('freemedi-patient-session')
-sessionChanges.onmessage = () => window.location.reload()
+sessionChanges.onmessage = () => {
+  if (!/^\/admin(?:\/|$)/.test(window.location.pathname)) window.location.reload()
+}
 
-export function announceSessionChange() {
+function announceSessionChange() {
   sessionChanges.postMessage('changed')
 }
 
@@ -28,8 +30,8 @@ export function loginTarget(value: unknown): string {
   if (typeof value !== 'string' || !value.startsWith('/')) return '/'
   try {
     const target = new URL(value, window.location.origin)
-    const preparation = /^\/appointments\/[A-Za-z0-9-]+\/preparation$/.test(target.pathname)
-    if (target.origin === window.location.origin && (patientPaths.has(target.pathname) || preparation)) {
+    const appointmentAction = /^\/appointments\/[A-Za-z0-9-]+\/(preparation|reschedule)$/.test(target.pathname)
+    if (target.origin === window.location.origin && (patientPaths.has(target.pathname) || appointmentAction)) {
       return target.pathname + target.search + target.hash
     }
   } catch {

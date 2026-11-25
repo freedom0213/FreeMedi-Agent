@@ -123,7 +123,7 @@ function scheduleLink(departmentId?: number, doctorId?: number, date?: string) {
   <p v-if="optionProblem" class="admin-form-error visit-message" role="alert">科室选项加载失败。{{ optionProblem }}</p>
   <p v-if="state === 'loading'" class="admin-panel admin-empty visit-message" role="status">正在读取预约和号源统计…</p>
   <div v-else-if="state === 'session'" class="admin-panel admin-empty visit-message" role="alert">
-    管理员会话已失效。<RouterLink :to="{ name: 'admin-login', query: { next: route.fullPath } }">重新登录</RouterLink>
+    管理员会话已失效。<RouterLink :to="{ name: 'admin-login' }">重新登录</RouterLink>
   </div>
   <div v-else-if="state === 'error'" class="admin-panel admin-empty visit-message" role="alert">
     {{ failure }} <button class="admin-button" type="button" @click="attempt++">重试</button>
@@ -139,7 +139,7 @@ function scheduleLink(departmentId?: number, doctorId?: number, date?: string) {
       <dl class="visit-metrics">
         <div v-for="metric in metrics" :key="metric.key"><dt>{{ metric.label }}</dt><dd>{{ format(data.totals[metric.key]) }}</dd></div>
       </dl>
-      <p class="admin-muted visit-note">预约数只计有效预约。余号只计当前仍开放且尚未开始的可预约号源。</p>
+      <p class="admin-muted visit-note">预约数只计有效预约。余号只计患者可查范围内、当前仍开放且尚未开始的可预约号源。</p>
     </section>
 
     <section class="admin-panel" aria-labelledby="visit-trend">

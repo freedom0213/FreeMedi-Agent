@@ -87,6 +87,14 @@ public class PortalAppointmentController {
                 limit == null ? AppointmentQueryService.DEFAULT_LIMIT : limit);
     }
 
+    @GetMapping("/mine/overview")
+    public AppointmentQueryService.PatientOverview overview(
+            @AuthenticationPrincipal(expression = "patient") Principal principal,
+            @RequestParam(defaultValue = "1") int upcomingPage,
+            @RequestParam(defaultValue = "1") int historyPage) {
+        return queryService.patientOverview(principal.userId(), upcomingPage, historyPage);
+    }
+
     /**
      * Someone else's appointment number is answered with 404 rather than 403: a patient should not be
      * able to learn whether a booking exists at all.
@@ -98,6 +106,37 @@ public class PortalAppointmentController {
         return queryService.findForPatient(appointmentNo, principal.userId())
                 .map(ResponseEntity::ok)
                 .orElseGet(() -> ResponseEntity.notFound().build());
+    }
+
+    @PostMapping("/{appointmentNo}/cancel")
+    public ResponseEntity<AppointmentWriteService.LifecycleResult> cancel(
+            @PathVariable String appointmentNo,
+            @AuthenticationPrincipal(expression = "patient") Principal principal) {
+        var result = writeService.cancel(appointmentNo, principal.userId());
+        return ResponseEntity.status("NOT_FOUND".equals(result.code()) ? 404 : result.success() ? 200 : 409).body(result);
+    }
+
+    @PostMapping("/{appointmentNo}/reschedule")
+    public ResponseEntity<BookingResponse> reschedule(
+            @PathVariable String appointmentNo,
+            @AuthenticationPrincipal(expression = "patient") Principal principal,
+            @Valid @RequestBody BookingRequest request) {
+        var result = writeService.reschedule(new AppointmentWriteService.RescheduleCommand(
+                principal.userId(), appointmentNo, request.slotId(), request.idempotencyKey()));
+        return ResponseEntity.status("NOT_FOUND".equals(result.code()) ? 404 : 200).body(BookingResponse.of(result));
+    }
+
+    @PostMapping("/{appointmentNo}/reschedule/status")
+    public ResponseEntity<BookingResponse> rescheduleStatus(
+            @PathVariable String appointmentNo,
+            @AuthenticationPrincipal(expression = "patient") Principal principal,
+            @Valid @RequestBody BookingRequest request) {
+        return writeService.lookupReschedule(new AppointmentWriteService.RescheduleCommand(
+                        principal.userId(), appointmentNo, request.slotId(), request.idempotencyKey()))
+                .map(result -> ResponseEntity.status("NOT_FOUND".equals(result.code()) ? 404 : 200)
+                        .body(BookingResponse.of(result)))
+                .orElseGet(() -> ResponseEntity.ok(new BookingResponse(false, null, null,
+                        "NOT_FOUND", "暂未查到这次改约的结果，可再次核验或重试同一次提交。")));
     }
 
     @PostMapping("/{appointmentNo}/consultation")

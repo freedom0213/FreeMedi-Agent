@@ -35,7 +35,7 @@ public class AdminCatalogService {
                       AND s.status = 'AVAILABLE' AND s.start_at > UTC_TIMESTAMP(3)
                       AND sc.status = 'OPEN' AND d.status = 'ACTIVE' AND dp.status = 'ACTIVE') AS remaining,
                    (SELECT COUNT(*) FROM appointment a JOIN appointment_slot s ON s.id = a.slot_id
-                      WHERE s.schedule_id = sc.id AND a.status = 'BOOKED') AS booked
+                      WHERE s.schedule_id = sc.id AND a.status IN ('BOOKED', 'CHECKED_IN')) AS booked
             """;
     private static final RowMapper<Schedule> SCHEDULE = (rs, row) -> new Schedule(rs.getLong("id"),
             rs.getLong("department_id"), rs.getString("department_name"), rs.getLong("doctor_id"),
@@ -216,7 +216,7 @@ public class AdminCatalogService {
         if ("CLOSED".equals(current)) return;
         var occupied = jdbc.queryForList("""
                 SELECT a.id FROM appointment a JOIN appointment_slot s ON s.id = a.slot_id
-                WHERE s.schedule_id = ? AND a.status = 'BOOKED' FOR UPDATE
+                WHERE s.schedule_id = ? AND a.status IN ('BOOKED', 'CHECKED_IN') FOR UPDATE
                 """, Long.class, id);
         if (!occupied.isEmpty()) throw conflict("已有 " + occupied.size() + " 笔有效预约，无法关闭此排班。");
         if (!jdbc.queryForList("""
@@ -245,7 +245,7 @@ public class AdminCatalogService {
     private void protectFutureBookings(String label, String field, long id) {
         var booked = jdbc.queryForList("""
                 SELECT a.id FROM appointment a JOIN appointment_slot s ON s.id = a.slot_id
-                WHERE a.status = 'BOOKED' AND s.end_at > UTC_TIMESTAMP(3) AND %s = ? FOR UPDATE
+                WHERE a.status IN ('BOOKED', 'CHECKED_IN') AND s.end_at > UTC_TIMESTAMP(3) AND %s = ? FOR UPDATE
                 """.formatted(field), Long.class, id);
         if (!booked.isEmpty()) throw conflict(label + "还有 " + booked.size() + " 笔有效预约，无法停用。");
     }
@@ -253,8 +253,8 @@ public class AdminCatalogService {
     private void validateWindow(LocalDateTime first, LocalDateTime end, Period period) {
         LocalDate today = LocalDate.now(clock.withZone(HOSPITAL));
         if (!first.atZone(HOSPITAL).toInstant().isAfter(clock.instant())
-                || first.toLocalDate().isAfter(today.plusDays(SlotQueryService.SEARCH_HORIZON_DAYS))) {
-            throw new IllegalArgumentException("号源须在当前时间之后、患者可查的未来 90 天内。");
+                || first.toLocalDate().isAfter(today.plusDays(SlotQueryService.SCHEDULE_HORIZON_DAYS))) {
+            throw new IllegalArgumentException("号源须在当前时间之后，并在未来 90 天排班范围内。");
         }
         if (first.toLocalTime().isBefore(period.start) || end.isAfter(first.toLocalDate().atTime(period.end))
                 || first.getSecond() != 0 || first.getNano() != 0) {

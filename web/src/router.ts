@@ -6,7 +6,7 @@ import AppointmentsView from './views/AppointmentsView.vue'
 import VisitPreparationView from './views/VisitPreparationView.vue'
 import LoginView from './views/LoginView.vue'
 import { loginTarget, readSession } from './api/auth'
-import { adminLoginTarget, readAdminSession } from './api/admin'
+import { readAdminSession } from './api/admin'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -17,6 +17,8 @@ const router = createRouter({
     { path: '/booking', name: 'booking', component: BookingView, meta: { requiresPatient: true } },
     { path: '/appointments', name: 'appointments', component: AppointmentsView, meta: { requiresPatient: true } },
     { path: '/appointments/:appointmentNo/preparation', name: 'visit-preparation', component: VisitPreparationView, meta: { requiresPatient: true } },
+    { path: '/appointments/:appointmentNo/reschedule', name: 'appointment-reschedule',
+      component: () => import('./views/RescheduleView.vue'), props: true, meta: { requiresPatient: true } },
     { path: '/admin/login', name: 'admin-login', component: () => import('./admin/AdminLogin.vue') },
     {
       path: '/admin',
@@ -27,6 +29,7 @@ const router = createRouter({
         { path: 'departments', name: 'admin-departments', component: () => import('./admin/CatalogDirectory.vue'), props: { kind: 'departments' } },
         { path: 'doctors', name: 'admin-doctors', component: () => import('./admin/CatalogDirectory.vue'), props: { kind: 'doctors' } },
         { path: 'schedules', name: 'admin-schedules', component: () => import('./admin/CatalogSchedules.vue') },
+        { path: 'appointments', name: 'admin-appointments', component: () => import('./admin/AdminAppointments.vue') },
         { path: 'knowledge', name: 'admin-knowledge', component: () => import('./admin/KnowledgeList.vue') },
         { path: 'knowledge-library', name: 'admin-knowledge-library', component: () => import('./admin/KnowledgeLibrary.vue') },
         { path: 'knowledge-chunks', name: 'admin-knowledge-chunks', component: () => import('./admin/KnowledgeFragments.vue'), props: { vectors: false } },
@@ -49,9 +52,9 @@ const router = createRouter({
 router.beforeEach(async (to) => {
   if (to.meta.requiresAdmin || to.name === 'admin-login') {
     const state = await readAdminSession()
-    if (to.name === 'admin-login' && state === 'signed-in') return adminLoginTarget(to.query.next)
+    if (to.name === 'admin-login' && state === 'signed-in') return { name: 'admin-home' }
     if (to.meta.requiresAdmin && state !== 'signed-in') {
-      return { name: 'admin-login', query: { next: to.fullPath, reason: state } }
+      return { name: 'admin-login', query: { reason: state } }
     }
     return
   }

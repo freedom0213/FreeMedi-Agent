@@ -155,7 +155,7 @@ function modelLabel(key: string) {
 
   <div class="model-call-workspace">
     <div v-if="overviewError" class="admin-panel admin-empty" role="alert">
-      <template v-if="expired">管理员会话已失效，请 <RouterLink class="admin-text-link" :to="{ name: 'admin-login', query: { next: route.fullPath } }">重新登录</RouterLink>。</template>
+      <template v-if="expired">管理员会话已失效，请 <RouterLink class="admin-text-link" :to="{ name: 'admin-login' }">重新登录</RouterLink>。</template>
       <template v-else>{{ overviewError }} <button class="admin-button" type="button" @click="refresh++">重试统计</button></template>
     </div>
     <p v-else-if="!overview" class="admin-panel admin-empty" role="status">正在读取模型调用统计…</p>

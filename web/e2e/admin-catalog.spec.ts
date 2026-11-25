@@ -9,6 +9,7 @@ test('窄屏分组导航、新建科室、预览排班并处理预约冲突', as
   const rows: ScheduleRow[] = []
   let created = false
   let closes = 0
+  let signed = false
   await page.route('**/api/**', async route => {
     const url = new URL(route.request().url())
     const workbench = emptyWorkbenchResponse(url)
@@ -32,7 +33,23 @@ test('窄屏分组导航、新建科室、预览排班并处理预约冲突', as
       schedule: rows[0],
       slots: [{ number: 1, startAt: rows[0].scheduleDate + 'T01:00:00Z', endAt: rows[0].scheduleDate + 'T01:15:00Z', status: 'AVAILABLE' }],
     } })
+    if (url.pathname === '/api/v1/admin/appointments') {
+      expect(url.searchParams.get('scheduleId')).toBe('1')
+      expect(url.searchParams.get('doctorId')).toBe('3')
+      expect(url.searchParams.get('from')).toBe(rows[0].scheduleDate)
+      return route.fulfill({ json: { page: 1, totalCount: 1, totalPages: 1, items: [{
+        scheduleId: 1, appointment: { appointmentNo: 'APT-READ-ONLY', appointmentDate: rows[0].scheduleDate,
+          timeRange: '09:00-09:15', departmentName: '康复科', doctorName: '周医生', status: signed ? 'CHECKED_IN' : 'BOOKED',
+          canCheckIn: !signed, checkedInAt: signed ? '2026-11-23T01:00:00Z' : null,
+          bookedVia: 'PORTAL', bookedAt: '2026-11-23T03:00:00Z' },
+      }] } })
+    }
     expect(request.headers()['x-csrf-token']).toBe('fixture')
+    if (url.pathname === '/api/v1/admin/appointments/APT-READ-ONLY/check-in') {
+      expect(request.method()).toBe('POST')
+      signed = true
+      return route.fulfill({ json: { success: true, code: null, message: '签到成功。' } })
+    }
     if (url.pathname === base + '/departments' && request.method() === 'POST') {
       expect(request.postDataJSON()).toMatchObject({ code: 'OPS', name: '康复科' })
       created = true
@@ -81,4 +98,120 @@ test('窄屏分组导航、新建科室、预览排班并处理预约冲突', as
   await page.reload()
   await page.getByRole('button', { name: '展开菜单' }).click()
   await expect(page.getByRole('link', { name: '排班管理' })).toHaveAttribute('aria-current', 'page')
+  await page.getByRole('link', { name: '查看预约', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '预约明细' })).toBeVisible()
+  await expect(page.getByLabel('医生', { exact: true })).toHaveValue('3')
+  await expect(page.getByRole('row', { name: /APT-READ-ONLY.*自助挂号.*已预约/ })).toBeVisible()
+  await page.getByRole('button', { name: '办理签到' }).click()
+  await expect(page.getByRole('group', { name: '核对签到预约' })).toContainText('APT-READ-ONLY')
+  await page.getByRole('button', { name: '确认签到' }).click()
+  await expect(page.getByRole('row', { name: /APT-READ-ONLY.*已签到/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: '办理签到' })).toHaveCount(0)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390)
+})
+
+test('预约明细可以筛选已过期，过期未签到的记录显示签到已截止', async ({ page }) => {
+  await page.route('**/api/v1/admin/**', async route => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/auth/session')) return route.fulfill({ json: { adminId: '200', displayName: '资料管理员' } })
+    if (url.pathname.endsWith('/options')) return route.fulfill({ json: [] })
+    if (url.pathname.endsWith('/appointments')) {
+      const status = url.searchParams.get('status')
+      return route.fulfill({ json: { items: status === 'BOOKED' ? [] : [{ scheduleId: 1, appointment: {
+        appointmentNo: 'APT-EXPIRED', appointmentDate: '2026-11-24', timeRange: '14:30-15:00',
+        departmentName: '消化内科', doctorName: '孙医生', status: 'EXPIRED', canCheckIn: false,
+        checkInOpensAt: '2026-11-24T06:00:00Z', bookedVia: 'AGENT', bookedAt: '2026-11-24T06:06:00Z',
+      } }], page: 1, totalPages: 1 } })
+    }
+    throw new Error('Unexpected request: ' + url.pathname)
+  })
+  await page.goto('/admin/appointments')
+  const row = page.getByRole('row', { name: /APT-EXPIRED/ })
+  await expect(row).toContainText('已过期')
+  await expect(row).toContainText('签到已截止')
+  await expect(row.getByRole('button', { name: '办理签到' })).toHaveCount(0)
+  await page.getByLabel('预约状态').selectOption('EXPIRED')
+  await page.getByRole('button', { name: '查询', exact: true }).click()
+  await expect(page).toHaveURL(/status=EXPIRED/)
+  await expect(row).toBeVisible()
+})
+
+test('预约明细选科室后才加载医生，医生选项重试成功后清除提示', async ({ page }) => {
+  const requestedDepartments: (string | null)[] = []
+  await page.route('**/api/v1/admin/**', async route => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/auth/session')) return route.fulfill({ json: { adminId: '200', displayName: '资料管理员' } })
+    if (url.pathname.endsWith('/departments/options')) return route.fulfill({ json: [{ id: 2, name: '呼吸内科' }] })
+    if (url.pathname.endsWith('/doctors/options')) {
+      requestedDepartments.push(url.searchParams.get('departmentId'))
+      if (requestedDepartments.length === 1) return route.fulfill({ status: 503 })
+      return route.fulfill({ json: [{ id: 3, name: '陈医生' }] })
+    }
+    if (url.pathname.endsWith('/appointments')) return route.fulfill({ json: { items: [], page: 1, totalPages: 0 } })
+    throw new Error('Unexpected request: ' + url.pathname)
+  })
+
+  await page.goto('/admin/appointments')
+  const doctor = page.getByLabel('医生', { exact: true })
+  await expect(page.getByText('没有符合条件的预约记录。')).toBeVisible()
+  await expect(doctor).toBeDisabled()
+  await expect(doctor).toContainText('请先选择科室')
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  expect(requestedDepartments).toEqual([])
+
+  await page.getByLabel('科室', { exact: true }).selectOption('2')
+  const error = page.getByRole('alert').filter({ hasText: '医生选项加载失败' })
+  await expect(error).toBeVisible()
+  await expect(doctor).toBeDisabled()
+  await error.getByRole('button', { name: '重试' }).click()
+  await expect(doctor).toBeEnabled()
+  await expect(error).toHaveCount(0)
+  await doctor.selectOption('3')
+  await page.getByRole('button', { name: '查询', exact: true }).click()
+  await expect(page).toHaveURL(/departmentId=2&doctorId=3/)
+
+  await page.getByRole('button', { name: '重置', exact: true }).click()
+  await expect(doctor).toBeDisabled()
+  await expect(doctor).toContainText('请先选择科室')
+  expect(requestedDepartments).toEqual(['2', '2'])
+})
+
+test('管理员从预约操作记录核对改约结果和关联预约', async ({ page }) => {
+  await page.route('**/api/v1/admin/**', async route => {
+    const url = new URL(route.request().url())
+    if (url.pathname.endsWith('/auth/session')) return route.fulfill({ json: { adminId: '200', displayName: '资料管理员' } })
+    if (url.pathname.endsWith('/departments/options')) return route.fulfill({ json: [] })
+    if (url.pathname.endsWith('/appointments')) {
+      const appointmentNo = url.searchParams.get('appointmentNo') || 'APT-ORIGINAL'
+      return route.fulfill({ json: { page: 1, totalPages: 1, items: [{ scheduleId: 1, appointment: {
+        appointmentNo, appointmentDate: '2026-11-25', timeRange: '09:00–09:15', departmentName: '心内科',
+        doctorName: '林医生', status: appointmentNo === 'APT-ORIGINAL' ? 'RESCHEDULED' : 'BOOKED',
+        bookedVia: 'PORTAL', bookedAt: '2026-11-23T01:00:00Z',
+      } }] } })
+    }
+    if (url.pathname.endsWith('/operations')) {
+      const original = url.pathname.includes('APT-ORIGINAL')
+      return route.fulfill({ json: {
+        appointmentNo: original ? 'APT-ORIGINAL' : 'APT-NEW',
+        originalAppointmentNo: original ? null : 'APT-ORIGINAL',
+        replacementAppointmentNo: original ? 'APT-NEW' : null,
+        events: { page: 1, totalPages: 1, items: [{
+          time: '2026-11-23T02:00:00Z', action: 'APPOINTMENT_RESCHEDULE',
+          operatorType: 'PATIENT', result: 'SUCCEEDED', reason: null,
+        }] },
+      } })
+    }
+    throw new Error('Unexpected request: ' + url.pathname)
+  })
+  await page.goto('/admin/appointments')
+  await page.getByRole('row', { name: /APT-ORIGINAL.*已改约/ }).getByRole('button', { name: '操作记录' }).click()
+  const dialog = page.getByRole('dialog', { name: '预约操作记录' })
+  await expect(dialog).toContainText('患者本人')
+  await expect(dialog).toContainText('成功')
+  await dialog.getByRole('button', { name: '查看新预约' }).click()
+  await expect(page).toHaveURL(/appointmentNo=APT-NEW/)
+  await expect(dialog).toContainText('APT-NEW')
+  await expect(dialog.getByRole('button', { name: '查看改约前的预约' })).toBeVisible()
+  await dialog.getByRole('button', { name: '关闭' }).click()
+  await expect(page.getByRole('row', { name: /APT-NEW.*已预约/ })).toBeVisible()
 })

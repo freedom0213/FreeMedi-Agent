@@ -54,9 +54,26 @@ test('知识库可按类型钻取，区分缺失向量、恢复索引并从试�
   const category = page.getByRole('row', { name: /就诊须知.*1 份/ })
   await expect(category).toBeVisible()
   await category.getByRole('link', { name: '片段', exact: true }).click()
+  await expect(page.locator('.admin-page-content')).toHaveCSS('animation-name', 'route-in')
   await expect(page.getByRole('combobox', { name: '资料类型', exact: true })).toHaveValue('VISIT_NOTICE')
-  await page.getByText('查看正文', { exact: true }).click()
-  await expect(page.getByText(row.content!, { exact: true })).toBeVisible()
+  await page.setViewportSize({ width: 1280, height: 900 })
+  const body = page.getByRole('button', { name: '查看正文' })
+  await body.hover()
+  await expect(page.getByRole('tooltip')).toHaveText(row.content!)
+  const fragmentRow = page.locator('.knowledge-fragment-table tbody tr').first()
+  const geometry = () => fragmentRow.evaluate(element =>
+    Array.from(element.children, child => {
+      const { width, height, x, y } = child.getBoundingClientRect()
+      return { width, height, x, y }
+    }))
+  const before = await geometry()
+  await body.click()
+  await expect(page.getByRole('dialog', { name: '到院证件' })).toContainText(row.content!)
+  expect(await geometry()).toEqual(before)
+  await page.keyboard.press('Escape')
+  await expect(body).toBeFocused()
+  await expect(page.getByRole('dialog')).toBeHidden()
+  await page.setViewportSize({ width: 390, height: 844 })
 
   await page.goto('/admin/knowledge-index?type=VISIT_NOTICE')
   await expect(page.getByText('向量缺失', { exact: true })).toBeVisible()

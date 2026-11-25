@@ -111,7 +111,7 @@ function activate() {
     模板加载失败。<button class="admin-button" type="button" @click="reload()">重新加载</button>
   </div>
   <p v-else-if="state === 'session'" class="admin-form-error" role="alert">
-    管理员会话已失效。<RouterLink class="admin-text-link" :to="{ name: 'admin-login', query: { next: '/admin/prompt-templates' } }">重新登录</RouterLink>
+    管理员会话已失效。<RouterLink class="admin-text-link" :to="{ name: 'admin-login' }">重新登录</RouterLink>
   </p>
   <div v-else-if="data" class="prompt-workspace">
     <section class="admin-panel" aria-labelledby="prompt-active">

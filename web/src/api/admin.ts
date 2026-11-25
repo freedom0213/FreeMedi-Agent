@@ -1,6 +1,6 @@
 import axios from 'axios'
+import type { AppointmentRecord, LifecycleResult } from '../types/portal'
 import { shallowRef } from 'vue'
-import { announceSessionChange } from './auth'
 
 interface AdminSession { adminId: string; displayName: string }
 interface CsrfResponse { headerName: string; token: string; adminId: string | null }
@@ -187,23 +187,13 @@ type DraftResult<T> = { kind: 'ready'; data: T } | { kind: 'issue'; message: str
 
 const adminHttp = axios.create({ baseURL: '/api/v1/admin', timeout: 10_000 })
 export const adminSession = shallowRef<AdminSession | null>(null)
+const sessionChanges = new BroadcastChannel('freemedi-admin-session')
+sessionChanges.onmessage = () => {
+  if (/^\/admin(?:\/|$)/.test(window.location.pathname)) window.location.reload()
+}
 
 export function adminHttpStatus(error: unknown) {
   return axios.isAxiosError(error) ? error.response?.status : undefined
-}
-
-export function adminLoginTarget(value: unknown) {
-  if (typeof value !== 'string' || !value.startsWith('/')) return '/admin'
-  try {
-    const target = new URL(value, window.location.origin)
-    const adminPath = /^\/admin(?:\/departments|\/doctors|\/schedules|\/tool-logs|\/tool-registry|\/agent-timeline|\/visit-operations|\/model-calls|\/model-config|\/prompt-templates|\/knowledge-library|\/knowledge-chunks|\/knowledge-index|\/knowledge(?:\/import\/preview|\/[^/]+)?)?\/?$/.test(target.pathname)
-    if (target.origin === window.location.origin && adminPath) {
-      return target.pathname + target.search + target.hash
-    }
-  } catch {
-    // An invalid URL falls back to the workbench.
-  }
-  return '/admin'
 }
 
 export async function readAdminSession(): Promise<SessionState> {
@@ -220,20 +210,20 @@ export async function readAdminSession(): Promise<SessionState> {
   }
 }
 
-export async function adminLogin(username: string, password: string, next: string) {
+export async function adminLogin(username: string, password: string) {
   const { data } = await adminHttp.get<CsrfResponse>('/auth/csrf')
   await adminHttp.post('/auth/login', new URLSearchParams({ username, password }), {
     headers: { [data.headerName]: data.token },
   })
-  announceSessionChange()
-  window.location.replace(next)
+  sessionChanges.postMessage('changed')
+  window.location.replace('/admin')
 }
 
 export async function adminLogout() {
   const headers = await adminCsrfHeaders()
   if (headers) {
     await adminHttp.post('/auth/logout', undefined, { headers })
-    announceSessionChange()
+    sessionChanges.postMessage('changed')
   }
   window.location.replace('/admin/login')
 }
@@ -264,7 +254,7 @@ export async function readKnowledgeIndexSummary(signal: AbortSignal) {
   return (await adminHttp.get<KnowledgeIndexSummary>('/knowledge/index/summary', { signal })).data
 }
 export async function readKnowledgeFragments(filters: FragmentFilters, vectors: boolean, signal: AbortSignal) {
-  return (await adminHttp.get<{ items: KnowledgeFragment[]; page: number; hasNext: boolean; totalPages?: number }>(
+  return (await adminHttp.get<{ items: KnowledgeFragment[]; page: number; hasNext?: boolean; totalPages?: number }>(
     '/knowledge/chunks', { params: { ...filters, vectors }, signal })).data
 }
 
@@ -298,7 +288,7 @@ export function agentSettingsError(error: unknown) {
   if (axios.isAxiosError(error)) {
     const status = error.response?.status
     if (status === 401 || status === 403) return '管理员会话已失效，请重新登录。'
-    const detail = error.response?.data?.error
+    const detail = error.response?.data?.error ?? error.response?.data?.message
     if (typeof detail === 'string' && /^[\u4e00-\u9fff]/u.test(detail)) return detail
     if (status === 409) return '配置已更新或尚未通过测试。请重新加载后核对。'
     if (status === 429) return '已有模型正在测试，请稍后重试。'
@@ -350,6 +340,7 @@ export const updateRegisteredTool = (name: string, enabled: boolean, timeoutMs: 
 type CatalogStatus = 'ACTIVE' | 'DISABLED'
 export type ClinicPeriod = 'MORNING' | 'AFTERNOON' | 'EVENING'
 export type CatalogKind = 'departments' | 'doctors'
+export type CatalogListKind = CatalogKind | 'schedules' | 'appointments'
 export interface CatalogOption { id: number; name: string; status: CatalogStatus }
 export interface DepartmentRow extends CatalogOption { code: string; description: string | null }
 export interface DoctorRow extends CatalogOption {
@@ -368,10 +359,13 @@ export interface ScheduleInput {
   departmentId: number; doctorId: number; date: string; period: ClinicPeriod; start: string; minutes: number; count: number
 }
 type CatalogPage<T> = { items: T[]; page: number; hasNext: boolean; totalPages?: number }
-type CatalogFilters = { q?: string; status?: string; departmentId?: number; doctorId?: number; from?: string; to?: string; page: number }
+export interface AdminAppointmentRow { scheduleId: number; appointment: AppointmentRecord }
+type CatalogFilters = { q?: string; status?: string; departmentId?: number; doctorId?: number; from?: string; to?: string;
+  appointmentNo?: string; scheduleId?: number; channel?: string; page: number }
 const catalogPath = '/catalog/'
-export async function readCatalog<T>(kind: CatalogKind | 'schedules', params: CatalogFilters, signal: AbortSignal) {
-  return (await adminHttp.get<CatalogPage<T>>(catalogPath + kind, { params, signal })).data
+export async function readCatalog<T>(kind: CatalogListKind, params: CatalogFilters, signal: AbortSignal) {
+  const path = kind === 'appointments' ? '/appointments' : catalogPath + kind
+  return (await adminHttp.get<CatalogPage<T>>(path, { params, signal })).data
 }
 export async function readCatalogOptions(kind: CatalogKind, signal: AbortSignal, departmentId?: number) {
   return (await adminHttp.get<CatalogOption[]>(catalogPath + kind + '/options', { params: { departmentId }, signal })).data
@@ -386,6 +380,26 @@ export async function readScheduleDetail(id: number, signal: AbortSignal) {
   return (await adminHttp.get<ScheduleDetail>(catalogPath + 'schedules/' + id, { signal })).data
 }
 export const createSchedule = (input: ScheduleInput) => writeAgentSettings<void>('post', catalogPath + 'schedules', input)
+export const checkInAppointment = (number: string) =>
+  writeAgentSettings<LifecycleResult>('post', '/appointments/' + encodeURIComponent(number) + '/check-in', undefined)
+export interface AppointmentOperation {
+  time: string
+  action: string
+  operatorType: string
+  operatorName: string | null
+  result: string
+  reason: string | null
+}
+export interface AppointmentHistory {
+  appointmentNo: string
+  originalAppointmentNo: string | null
+  replacementAppointmentNo: string | null
+  events: { items: AppointmentOperation[]; page: number; totalPages: number }
+}
+export async function readAppointmentHistory(number: string, page: number, signal: AbortSignal) {
+  return (await adminHttp.get<AppointmentHistory>('/appointments/' + encodeURIComponent(number) + '/operations',
+    { params: { page }, signal })).data
+}
 export const closeSchedule = (id: number) => writeAgentSettings<void>('post', catalogPath + 'schedules/' + id + '/close', undefined)
 
 export interface AppointmentCounts { booked: number; portal: number; agent: number; remaining: number; occupied: number }

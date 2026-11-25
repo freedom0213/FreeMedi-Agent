@@ -574,9 +574,8 @@ public final class AgentRuntimeService implements AgentRuntime {
             return confirmationFailure(code, String.valueOf(attempt.get("message")), context);
         }
         TaskStatus status = context.snapshot().status();
-        if (claimed && status == TaskStatus.COMPLETED && context.snapshot().facts().containsKey("appointmentId")) {
-            return new ConfirmationResult(true, "已核验原有预约。", status, List.of(), context.snapshot());
-        }
+        boolean previouslyVerified = claimed && status == TaskStatus.COMPLETED
+                && context.snapshot().facts().containsKey("appointmentId");
         java.util.Optional<AppointmentExecutionResult> original;
         long started = System.nanoTime();
         try {
@@ -589,6 +588,9 @@ public final class AgentRuntimeService implements AgentRuntime {
         }
         if (original.isPresent()) {
             var found = original.get();
+            if (closedAppointment(found.code())) {
+                return closedAppointmentConfirmation(context, found.appointmentId(), found.code(), found.message());
+            }
             if (status == TaskStatus.EXECUTING && (claimed || found.success())) {
                 tracePlan(context, "APPOINTMENT_LOOKUP", found.success() ? "SUCCEEDED" : "FAILED",
                         found.code(), AgentCallPolicy.elapsed(started));
@@ -607,6 +609,7 @@ public final class AgentRuntimeService implements AgentRuntime {
                 return verifyOriginal(context, principal, found.appointmentId(), new ArrayList<>());
             }
         }
+        if (previouslyVerified) return new ConfirmationResult(true, "已核验原有预约。", status, List.of(), context.snapshot());
         if (claimed && status == TaskStatus.VERIFYING
                 && context.snapshot().facts().get("appointmentId") instanceof String existingNo) {
             return verifyOriginal(context, principal, existingNo, new ArrayList<>());
@@ -638,6 +641,9 @@ public final class AgentRuntimeService implements AgentRuntime {
     private ConfirmationResult applyExecution(TaskContext context, Principal principal,
                                                AppointmentExecutionResult execution, List<AgentEvent> events) {
         if (!execution.success()) {
+            if (closedAppointment(execution.code())) {
+                return closedAppointmentConfirmation(context, execution.appointmentId(), execution.code(), execution.message());
+            }
             String code = execution.code() == null ? "BOOKING_REJECTED" : execution.code();
             boolean reselection = List.of("SLOT_UNAVAILABLE", "SLOT_INVALID", "SLOT_NOT_FOUND",
                     "PLAN_EXPIRED", "IDEMPOTENCY_CONFLICT").contains(code);
@@ -672,6 +678,9 @@ public final class AgentRuntimeService implements AgentRuntime {
                     context.snapshot().taskId().value(), unavailable.getClass().getSimpleName());
             verification = null;
         }
+        if (verification != null && closedAppointment(verification.code())) {
+            return closedAppointmentConfirmation(context, appointmentNo, verification.code(), verification.message());
+        }
         if (verification == null || !verification.success()) {
             tracePlan(context, "APPOINTMENT_VERIFY", "PENDING", "VERIFY_PENDING", AgentCallPolicy.elapsed(started));
             stateStore.save(context);
@@ -685,6 +694,23 @@ public final class AgentRuntimeService implements AgentRuntime {
         stateStore.save(context);
         return new ConfirmationResult(true, verification.message(), context.snapshot().status(), events,
                 context.snapshot());
+    }
+
+    private static boolean closedAppointment(String code) {
+        return "APPOINTMENT_CANCELLED".equals(code) || "APPOINTMENT_RESCHEDULED".equals(code);
+    }
+
+    private ConfirmationResult closedAppointmentConfirmation(TaskContext context, String appointmentNo, String code, String message) {
+        if (context.snapshot().status() == TaskStatus.EXECUTING && appointmentNo != null) {
+            context.transitionTo(TaskStatus.VERIFYING);
+            context.setPlanStatus(PlanStatus.EXECUTED);
+            context.putFact("appointmentId", appointmentNo);
+        }
+        if (context.snapshot().status() == TaskStatus.VERIFYING) {
+            context.transitionTo(TaskStatus.COMPLETED);
+            stateStore.save(context);
+        }
+        return confirmationFailure(code, message, context);
     }
 
     @Override

@@ -1,5 +1,7 @@
 # FreeMedi-Agent 文档入口
 
+FreeMedi-Agent 是项目显示名称。Java 包 `com.mediflow.agent` 和 Maven 构建产物 `mediflow-agent` 用于代码和本地启动。
+
 > 更新日期：2026-11-20。用户已确认首版功能范围。[首版交付计划](product/delivery-roadmap-v1.md)维护核心、后置、验收与 S0—S6 顺序。
 > S0 日期基线已恢复，S1 患者真实登录、身份隔离与预约正确性基线已验收。见[S1 验收及演示账号](product/s1-patient-session-acceptance.md)。需求与候选见[S2 验收](product/s2-appointment-options.md)，资料问答见[S3 验收](product/s3-knowledge-consultation.md)，预约后咨询见[S4 验收](product/s4-visit-preparation.md)，预约恢复、限时与追踪见[S5 验收](product/s5-booking-recovery.md)。
 > [S6 综合验收](product/s6-local-acceptance.md)记录真实 DeepSeek、Qdrant 和 Chrome 的结果，包括医生与科室引用、资料下架以及本地启动步骤。

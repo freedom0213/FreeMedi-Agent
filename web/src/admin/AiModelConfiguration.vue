@@ -148,7 +148,7 @@ watchEffect((invalidate) => {
   </div>
   <div v-else-if="state === 'session'" class="admin-panel admin-empty" role="alert">
     <p>管理员会话已失效。</p>
-    <RouterLink class="admin-button" :to="{ name: 'admin-login', query: { next: $route.fullPath } }">重新登录</RouterLink>
+    <RouterLink class="admin-button" :to="{ name: 'admin-login' }">重新登录</RouterLink>
   </div>
   <div v-else-if="configuration" class="model-settings">
     <section class="admin-panel" aria-labelledby="admin-active-model">

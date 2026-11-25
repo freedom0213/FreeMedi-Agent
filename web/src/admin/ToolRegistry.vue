@@ -85,7 +85,7 @@ watchEffect((invalidate) => {
     </div>
     <div v-else-if="state === 'session'" class="admin-empty" role="alert">
       <p>管理员会话已失效。</p>
-      <RouterLink class="admin-button" :to="{ name: 'admin-login', query: { next: $route.fullPath } }">重新登录</RouterLink>
+      <RouterLink class="admin-button" :to="{ name: 'admin-login' }">重新登录</RouterLink>
     </div>
     <p v-else-if="!tools.length" class="admin-empty">当前暂无已注册工具。</p>
     <details v-for="(tool, index) in tools" v-else :key="tool.name" :open="index === 0">

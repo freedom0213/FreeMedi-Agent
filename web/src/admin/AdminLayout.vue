@@ -10,6 +10,7 @@ const groups = [
     { name: 'admin-departments', label: '科室管理' },
     { name: 'admin-doctors', label: '医生管理' },
     { name: 'admin-schedules', label: '排班管理' },
+    { name: 'admin-appointments', label: '预约明细' },
   ] },
   { id: 'ai', label: 'AI 能力配置', icon: SlidersHorizontal, pages: [
     { name: 'admin-model-config', label: 'AI 模型配置' },
@@ -133,7 +134,9 @@ async function logout() {
       <main ref="content" class="admin-content" aria-label="管理端内容" tabindex="0">
         <div class="admin-page">
           <p v-if="logoutError" class="admin-form-error" role="alert">退出失败，请重试。</p>
-          <RouterView v-slot="{ Component }"><component :is="Component" :key="String(route.name)" /></RouterView>
+          <RouterView v-slot="{ Component }">
+            <div :key="String(route.name)" class="admin-page-content"><component :is="Component" /></div>
+          </RouterView>
         </div>
       </main>
     </div>

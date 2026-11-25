@@ -59,7 +59,7 @@ public class AppointmentOperationsDashboard {
                            SUM(CASE WHEN a.booked_via = 'PORTAL' THEN 1 ELSE 0 END) AS portal,
                            SUM(CASE WHEN a.booked_via = 'AGENT' THEN 1 ELSE 0 END) AS agent
                     FROM scoped sc JOIN appointment_slot s ON s.schedule_id = sc.id
-                    JOIN appointment a ON a.slot_id = s.id AND a.status = 'BOOKED'
+                    JOIN appointment a ON a.slot_id = s.id AND a.status IN ('BOOKED', 'CHECKED_IN')
                     GROUP BY sc.id
                 )
                 SELECT sc.schedule_date, sc.schedule_status, sc.department_id, sc.department_name, sc.doctor_id, sc.doctor_name,
@@ -73,7 +73,7 @@ public class AppointmentOperationsDashboard {
                         rs.getLong("department_id"), rs.getString("department_name")),
                 new Counts(rs.getLong("booked"), rs.getLong("portal"), rs.getLong("agent"),
                         rs.getLong("remaining"), rs.getLong("occupied")), "OPEN".equals(rs.getString("schedule_status"))),
-                from, to, departmentId, departmentId, Timestamp.from(now), today, today.plusDays(SlotQueryService.SEARCH_HORIZON_DAYS));
+                from, to, departmentId, departmentId, Timestamp.from(now), today, SlotQueryService.patientWindowEnd(today));
         var days = new HashMap<LocalDate, Counts>();
         var departments = new LinkedHashMap<DepartmentKey, Counts>();
         var doctors = new LinkedHashMap<DoctorKey, Counts>();

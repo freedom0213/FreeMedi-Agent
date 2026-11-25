@@ -24,7 +24,7 @@ public final class ReadToolSpecs {
                     new ReadToolSpec.Parameter("limit", INTEGER, false, "最多返回数量，不超过 50")));
 
     public static final ReadToolSpec GET_APPOINTMENT_RULES = new ReadToolSpec("getAppointmentRules",
-            "查询预约系统的技术限制。患者询问医院资料时使用 searchHospitalKnowledge");
+            "查询预约系统的技术限制和已有预约的取消、改约、签到规则。患者询问医院资料时使用 searchHospitalKnowledge");
 
     public static final ReadToolSpec SEARCH_HOSPITAL_KNOWLEDGE = new ReadToolSpec(KnowledgeConsultation.TOOL_NAME, """
             检索医院资料库。当患者询问医生专长、科室介绍、预约规则、就诊须知和检查前的一般注意事项时使用。

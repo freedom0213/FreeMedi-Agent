@@ -7,7 +7,8 @@ import AppShell from '../components/AppShell.vue'
 import AppointmentRequirementsForm from '../components/AppointmentRequirementsForm.vue'
 import KnowledgeSources from '../components/KnowledgeSources.vue'
 import { errorMessage } from '../api/http'
-import { periodLabel } from '../api/portal'
+import { listGuideHistory, type GuideConversation } from '../api/agent'
+import { cancellationNotice, getAppointment, periodLabel } from '../api/portal'
 import { useAgentStore } from '../stores/agent'
 import type { KnowledgeReply, RequirementChanges, TaskStatus } from '../types/agent'
 
@@ -23,6 +24,14 @@ const confirmHeading = ref<HTMLElement | null>(null)
 const openSidebar = ref<'session' | 'progress' | null>(null)
 const formOpen = ref(false)
 const choosingAgain = ref(false)
+const history = ref<GuideConversation[]>([])
+const historyCursor = ref<number | null>(null)
+const historyLoading = ref(false)
+const historyError = ref(false)
+const historyDate = new Intl.DateTimeFormat('zh-CN', {
+  month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Shanghai',
+})
+let historyRequest = 0
 
 const turns = computed(() => agent.task?.turns ?? [])
 const knowledgeReplies = computed(() => agent.task?.facts.knowledgeReplies as Record<string, KnowledgeReply> | undefined)
@@ -55,6 +64,25 @@ const canConfirm = computed(() => canReply.value && showReview.value)
 const isComplete = computed(() => taskStatus.value === 'COMPLETED' && !!agent.task?.facts.appointmentId)
 const verifiedAppointmentNo = computed(() => typeof agent.task?.facts.appointmentId === 'string'
   ? agent.task.facts.appointmentId : undefined)
+const actualBookingStatus = ref<string>()
+watch(verifiedAppointmentNo, (number, _, onCleanup) => {
+  actualBookingStatus.value = undefined
+  if (!number) return
+  let active = true
+  onCleanup(() => { active = false })
+  void getAppointment(number).then(record => {
+    if (active) actualBookingStatus.value = record.status
+  }).catch(() => {
+    // The appointment detail can be opened directly to retry.
+  })
+}, { immediate: true })
+const bookingCompletion = computed(() => {
+  if (actualBookingStatus.value === 'EXPIRED') return '原预约已过期'
+  if (actualBookingStatus.value === 'CANCELLED') return '原预约已取消'
+  if (actualBookingStatus.value === 'RESCHEDULED') return '原预约已改约'
+  if (actualBookingStatus.value === 'CHECKED_IN') return '原预约已签到'
+  return actualBookingStatus.value === 'BOOKED' ? '预约已创建并核验' : '查看原预约状态'
+})
 const isFailed = computed(() => taskStatus.value === 'FAILED')
 const canStartNew = computed(() => !restoring.value && !agent.busy && !agent.pendingConfirmation)
 const showWelcome = computed(() => !restoring.value && !turns.value.length && !agent.candidateBatch
@@ -105,6 +133,7 @@ const visibleEvents = computed(() => agent.events.filter(event => [
   || event.summary === currentPlanId.value)).slice(-8).reverse())
 
 onMounted(async () => {
+  void loadHistory()
   await restoreTask()
   const intent = typeof route.query.intent === 'string' ? route.query.intent : ''
   if (intent || route.query.new === '1') {
@@ -123,6 +152,50 @@ async function restoreTask() {
 }
 
 onUnmounted(() => agent.stopWatching())
+
+async function loadHistory(older = false) {
+  if (older && (historyLoading.value || historyCursor.value === null)) return
+  const request = ++historyRequest
+  historyLoading.value = true
+  historyError.value = false
+  try {
+    const result = await listGuideHistory(older ? historyCursor.value ?? undefined : undefined)
+    if (request !== historyRequest) return
+    if (!older) {
+      history.value = result.items
+      historyCursor.value = result.nextCursor
+    } else {
+      const known = new Set(history.value.map(item => item.taskId))
+      history.value.push(...result.items.filter(item => !known.has(item.taskId)))
+      historyCursor.value = result.nextCursor
+    }
+  } catch {
+    if (request === historyRequest) historyError.value = true
+  } finally {
+    if (request === historyRequest) historyLoading.value = false
+  }
+}
+
+async function openHistoryTask(id: string) {
+  if (!canStartNew.value || id === agent.taskId) return
+  draft.value = ''
+  formReset.value++
+  formDirty.value = false
+  formOpen.value = false
+  choosingAgain.value = false
+  restoring.value = true
+  try {
+    await agent.openTask(id)
+    if (agent.pendingMessage?.taskId === id) draft.value = agent.pendingMessage.text
+  } finally {
+    restoring.value = false
+  }
+  if (openSidebar.value === 'session') {
+    openSidebar.value = null
+    await nextTick()
+    composerInput.value?.focus()
+  }
+}
 
 watch(turns, async () => {
   await nextTick()
@@ -146,6 +219,8 @@ async function submit(value = draft.value) {
     const messageText = agent.error || errorMessage(error)
     agent.error = messageText
     ElMessage.error(messageText)
+  } finally {
+    void loadHistory()
   }
 }
 
@@ -165,6 +240,8 @@ async function queryCandidates(changes: RequirementChanges) {
     }
   } catch (error) {
     agent.error = errorMessage(error)
+  } finally {
+    void loadHistory()
   }
 }
 
@@ -238,7 +315,7 @@ function statusText(status: TaskStatus | undefined) {
   return ({
     UNDERSTANDING: '正在理解需求', SEARCHING: '正在查询号源', NEED_MORE_INFO: '需要补充信息',
     PROPOSAL_READY: '方案已生成', AWAITING_CONFIRMATION: '等待你的确认', EXECUTING: '正在创建预约',
-    VERIFYING: '正在核验结果', COMPLETED: isComplete.value ? '预约已完成' : '本次咨询已结束', FAILED: '处理未完成', CANCELLED: '已取消',
+    VERIFYING: '正在核验结果', COMPLETED: isComplete.value ? bookingCompletion.value : '本次咨询已结束', FAILED: '处理未完成', CANCELLED: '已取消',
   } as Record<TaskStatus, string>)[status]
 }
 
@@ -313,8 +390,28 @@ function formatDate(date: string | undefined) {
           </button>
           <div class="current-session" :class="{ 'has-session': agent.taskId }">
             <span>当前会话</span>
-            <strong>{{ restoring ? '正在恢复会话…' : agent.taskId ? '智能导诊与预约' : '尚未开始会话' }}</strong>
+            <strong>{{ restoring ? '正在恢复会话…' : agent.taskId
+              ? history.find(item => item.taskId === agent.taskId)?.title || '智能导诊与预约' : '尚未开始会话' }}</strong>
           </div>
+          <section class="guide-history" aria-labelledby="guide-history-title">
+            <h3 id="guide-history-title">历史会话</h3>
+            <p v-if="historyLoading && !history.length" role="status">正在读取历史会话…</p>
+            <p v-else-if="!history.length && !historyError">发起导诊后，可以在这里返回之前的会话。</p>
+            <ul v-if="history.length">
+              <li v-for="item in history" :key="item.taskId">
+                <button type="button" class="history-entry" :aria-current="item.taskId === agent.taskId ? 'true' : undefined"
+                  :aria-disabled="!canStartNew || item.taskId === agent.taskId" :title="item.title" @click="openHistoryTask(item.taskId)">
+                  <strong>{{ item.title }}</strong>
+                  <time :datetime="item.updatedAt">{{ historyDate.format(new Date(item.updatedAt)) }}</time>
+                </button>
+              </li>
+            </ul>
+            <p v-if="historyError" role="status">暂时无法读取历史会话。</p>
+            <button v-if="historyError || historyCursor !== null" type="button" class="button-secondary history-more"
+              :disabled="historyLoading" @click="loadHistory(historyCursor !== null)">
+              {{ historyError ? '重试加载' : historyLoading ? '正在加载…' : '加载更早会话' }}
+            </button>
+          </section>
         </aside>
 
         <aside id="guide-insights" class="guide-insights" :class="{ 'is-open': openSidebar === 'progress' }" aria-label="本次导诊">
@@ -472,6 +569,7 @@ function formatDate(date: string | undefined) {
                 <div><dt>科室</dt><dd>{{ slot.departmentName }}</dd></div>
                 <div><dt>医生</dt><dd>{{ slot.doctorName }}</dd></div>
               </dl>
+              <p v-if="slot.cancellationDeadline" class="guide-receipt-details">{{ cancellationNotice(slot.cancellationDeadline) }}</p>
               <div class="guide-actions guide-receipt-actions">
                 <button class="button-primary" type="button" :disabled="!canConfirm" @click="confirmAppointment">
                   确认预约 <ArrowRight :size="16" aria-hidden="true" />
@@ -485,7 +583,7 @@ function formatDate(date: string | undefined) {
 
           <div v-if="isComplete" class="guide-completion" role="status">
             <CircleCheck :size="20" aria-hidden="true" />
-            <div><strong>预约已创建并核验</strong>
+            <div><strong>{{ bookingCompletion }}</strong>
               <RouterLink class="guide-text-button appointment-result-link"
                 :to="{ name: 'appointments', query: { appointmentNo: verifiedAppointmentNo } }">查看原预约</RouterLink>
             </div>
@@ -544,6 +642,16 @@ function formatDate(date: string | undefined) {
 .new-session { width: 100%; padding-inline: 6px; }
 .current-session { display: grid; gap: 3px; padding: 10px; margin-top: 15px; border: 1px solid var(--brand-line); border-radius: 9px; background: var(--brand-paper); }
 .current-session.has-session { background: var(--brand-lilac); }
+.guide-history { margin-top: 20px; min-width: 0; }
+.guide-history h3 { margin: 0 0 8px; font-size: 13px; }
+.guide-history > p { margin: 4px 0 8px; color: var(--brand-muted); font-size: 12px; }
+.guide-history ul { display: grid; gap: 4px; max-height: min(42vh, 380px); overflow: auto; padding: 3px; margin: 0 -3px; list-style: none; }
+.history-entry { display: grid; width: 100%; min-height: 44px; gap: 2px; padding: 6px 8px; border: 1px solid transparent; border-radius: 8px; background: transparent; text-align: left; cursor: pointer; }
+.history-entry strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.history-entry time { color: var(--brand-muted); font-size: 11px; }
+.history-entry[aria-current], .history-entry:not([aria-disabled=true]):hover { border-color: var(--brand-line); background: var(--brand-paper); }
+.history-entry[aria-disabled=true] { cursor: default; }
+.history-more { margin-top: 8px; width: 100%; font-size: 12px; }
 .current-session span, .next-action span { font-size: 12px; color: var(--brand-muted); }
 .current-session strong, .next-action strong { font-size: 14px; overflow-wrap: anywhere; }
 .next-action { display: flex; align-items: center; gap: 9px; margin-bottom: 15px; padding: 10px; border-radius: 10px; background: #e4f1ed; color: #244d40; }

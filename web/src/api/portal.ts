@@ -1,9 +1,11 @@
 import type {
   AppointmentRecord,
+  AppointmentOverview,
   AvailableSlot,
   BookingResult,
   Department,
   Doctor,
+  LifecycleResult,
   SlotSearchResponse,
 } from '../types/portal'
 import { http } from './http'
@@ -27,8 +29,15 @@ export async function searchSlots(filters: {
   doctorId?: number
   date?: string
   period?: string
+  page?: number
+  limit?: number
 }): Promise<SlotSearchResponse> {
   const { data } = await http.get<SlotSearchResponse>('/slots', { params: filters })
+  return data
+}
+
+export async function readSlotWindow() {
+  const { data } = await http.get<Pick<SlotSearchResponse, 'searchStartDate' | 'searchEndDate'>>('/slots/window')
   return data
 }
 
@@ -42,14 +51,42 @@ export async function checkPortalBooking(slotId: number, idempotencyKey: string)
   return data
 }
 
-export async function listMyAppointments(): Promise<AppointmentRecord[]> {
-  const { data } = await http.get<AppointmentRecord[]>('/appointments/mine')
+export async function rescheduleAppointment(
+  appointmentNo: string, slotId: number, idempotencyKey: string, checkOnly: boolean,
+): Promise<BookingResult> {
+  const path = '/appointments/' + encodeURIComponent(appointmentNo) + '/reschedule'
+  const { data } = await http.post<BookingResult>(checkOnly ? path + '/status' : path,
+    { slotId, idempotencyKey }, { validateStatus: status => status === 200 || status === 404 })
+  return data
+}
+
+export async function readAppointmentOverview(upcomingPage: number, historyPage: number): Promise<AppointmentOverview> {
+  const { data } = await http.get<AppointmentOverview>('/appointments/mine/overview', { params: { upcomingPage, historyPage } })
   return data
 }
 
 export async function getAppointment(appointmentNo: string): Promise<AppointmentRecord> {
   const { data } = await http.get<AppointmentRecord>(`/appointments/${encodeURIComponent(appointmentNo)}`)
   return data
+}
+
+export async function cancelAppointment(appointmentNo: string): Promise<LifecycleResult> {
+  const { data } = await http.post<LifecycleResult>('/appointments/' + encodeURIComponent(appointmentNo) + '/cancel')
+  return data
+}
+
+const hospitalDateTime = new Intl.DateTimeFormat('zh-CN', {
+  timeZone: 'Asia/Shanghai', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+})
+
+export function formatHospitalDateTime(value: string) {
+  return hospitalDateTime.format(new Date(value))
+}
+
+export function cancellationNotice(deadline?: string) {
+  if (!deadline) return ''
+  return Date.parse(deadline) <= Date.now() ? '该预约已过线上取消时间。'
+    : '可在 ' + formatHospitalDateTime(deadline) + ' 前线上取消。'
 }
 
 export async function openVisitConsultation(appointmentNo: string): Promise<string> {

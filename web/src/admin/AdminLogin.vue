@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { ArrowRight, Cross, ShieldCheck } from 'lucide-vue-next'
 import { useRoute } from 'vue-router'
-import { adminHttpStatus, adminLogin, adminLoginTarget } from '../api/admin'
+import { adminHttpStatus, adminLogin } from '../api/admin'
 import './admin.css'
 
 const route = useRoute()
@@ -11,7 +11,7 @@ const password = ref('')
 const error = ref('')
 const working = ref(false)
 const hint = computed(() => {
-  if (route.query.reason === 'forbidden') return '当前是患者会话。登录管理员账号后，此浏览器将切换身份。'
+  if (route.query.reason === 'forbidden') return '当前无法使用管理端，请使用有权限的管理员账号登录。'
   if (route.query.reason === 'unavailable') return '暂时无法连接管理服务。请确认已启动本地后端后再登录。'
   return ''
 })
@@ -21,7 +21,7 @@ async function submit() {
   working.value = true
   error.value = ''
   try {
-    await adminLogin(username.value.trim(), password.value, adminLoginTarget(route.query.next))
+    await adminLogin(username.value.trim(), password.value)
   } catch (failure) {
     error.value = adminHttpStatus(failure) === 401
       ? '登录失败，请核对管理员账号和密码。'

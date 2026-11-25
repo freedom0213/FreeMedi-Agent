@@ -2,9 +2,13 @@ package com.mediflow.agent.appointment;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 
-/** Shared order for writes that affect booking availability: department, doctor, schedule, slot. */
+/** Shared locking order for appointment operations. Patient locks precede inventory and appointment locks. */
 final class AppointmentAvailability {
     private AppointmentAvailability() {}
+
+    static void lockPatient(JdbcTemplate jdbc, long patientId) {
+        jdbc.queryForList("SELECT id FROM sys_user WHERE id = ? FOR UPDATE", Long.class, patientId);
+    }
 
     static String lockDepartment(JdbcTemplate jdbc, long departmentId) {
         return lockStatus(jdbc, "SELECT status FROM department WHERE id = ? FOR UPDATE", departmentId);

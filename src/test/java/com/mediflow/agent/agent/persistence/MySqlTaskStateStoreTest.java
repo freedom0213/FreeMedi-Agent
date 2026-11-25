@@ -1,6 +1,7 @@
 package com.mediflow.agent.agent.persistence;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -24,11 +25,13 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -61,6 +64,7 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
@@ -188,6 +192,21 @@ class MySqlTaskStateStoreTest {
     }
 
     @Test
+    void cancellationDeadlineIsExclusiveAndRejectedAttemptsKeepTheSlot() {
+        var booked = appointmentWriteService.book(AppointmentWriteService.BookingCommand.forSlot(
+                new AppointmentWriteService.Actor(patientId, "PATIENT"), "cutoff-fixture", slotId));
+        var deadline = FIXTURE_DATE.minusDays(1).atTime(23, 0).atZone(ZoneId.of("Asia/Shanghai")).toInstant();
+        var atDeadline = new AppointmentWriteService(jdbc.getDataSource(), transactionManager, Clock.fixed(deadline, ZoneOffset.UTC));
+        assertThat(atDeadline.cancel(booked.appointmentNo(), patientId).code()).isEqualTo("CANCEL_CUTOFF_PASSED");
+        assertThat(jdbc.queryForObject("SELECT status FROM appointment_slot WHERE id = ?", String.class, slotId))
+                .isEqualTo("RESERVED");
+        var before = new AppointmentWriteService(jdbc.getDataSource(), transactionManager, Clock.fixed(deadline.minusMillis(1), ZoneOffset.UTC));
+        assertThat(before.cancel(booked.appointmentNo(), patientId).success()).isTrue();
+        assertThat(jdbc.queryForObject("SELECT status FROM appointment_slot WHERE id = ?", String.class, slotId))
+                .isEqualTo("AVAILABLE");
+    }
+
+    @Test
     void portalStatusAndRetryUseTheOriginalSlotAndKey() throws Exception {
         MockHttpSession session = login(fixtureUsername, DEMO_A_PASSWORD);
         String key = "s5-portal-" + UUID.randomUUID();
@@ -309,6 +328,37 @@ class MySqlTaskStateStoreTest {
                         .content(body.replace("就诊要带什么证件？", "查另一个号源")))
                 .andExpect(status().isBadRequest());
         assertThat(count("agent_tool_call")).isEqualTo(1);
+    }
+
+    @Test
+    void openingVisitPreparationWaitsForCancellationWithoutLockingTheAppointmentFirst() throws Exception {
+        var booked = appointmentWriteService.book(AppointmentWriteService.BookingCommand.forSlot(
+                new AppointmentWriteService.Actor(patientId, "PATIENT"), "visit-cancel-race", slotId));
+        assertThat(booked.success()).isTrue();
+        var executor = Executors.newSingleThreadExecutor();
+        var entered = new CountDownLatch(1);
+        try {
+            var tx = new TransactionTemplate(transactionManager);
+            var consultation = tx.execute(status -> {
+                jdbc.queryForList("SELECT id FROM sys_user WHERE id = ? FOR UPDATE", Long.class, patientId);
+                var pending = executor.submit(() -> {
+                    entered.countDown();
+                    return taskApplication.openVisitConsultation(principal, booked.appointmentNo());
+                });
+                assertThatCode(() -> {
+                    assertThat(entered.await(5, TimeUnit.SECONDS)).isTrue();
+                }).doesNotThrowAnyException();
+                assertThatThrownBy(() -> pending.get(750, TimeUnit.MILLISECONDS))
+                        .isInstanceOf(TimeoutException.class);
+                assertThat(jdbc.queryForList("SELECT id FROM appointment WHERE appointment_no = ? FOR UPDATE NOWAIT",
+                        Long.class, booked.appointmentNo())).hasSize(1);
+                assertThat(appointmentWriteService.cancel(booked.appointmentNo(), patientId).success()).isTrue();
+                return pending;
+            });
+            assertThat(consultation.get(10, TimeUnit.SECONDS)).isEmpty();
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     @Test
@@ -552,6 +602,93 @@ class MySqlTaskStateStoreTest {
     }
 
     @Test
+    void portalSearchPaginatesOnlySlotsWithinThePatientWindow() throws Exception {
+        var secondDate = slotQueryService.today().plusDays(27);
+        var excluded = secondDate.plusDays(1);
+        for (var day : java.util.List.of(secondDate, excluded)) {
+            jdbc.update("INSERT INTO doctor_schedule(doctor_id, schedule_date, clinic_period, status) VALUES (?, ?, 'AFTERNOON', 'OPEN')",
+                    doctorId, day);
+            long schedule = jdbc.queryForObject("SELECT id FROM doctor_schedule WHERE doctor_id = ? AND schedule_date = ?",
+                    Long.class, doctorId, day);
+            jdbc.update("INSERT INTO appointment_slot(schedule_id, slot_no, start_at, end_at, status) VALUES (?, 1, ?, ?, 'AVAILABLE')",
+                    schedule, day + " 06:00:00", day + " 06:30:00");
+        }
+        String doctor = Long.toString(doctorId);
+        mockMvc.perform(get("/api/v1/slots").param("doctorId", doctor).param("limit", "1"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalCount").value(2))
+                .andExpect(jsonPath("$.totalPages").value(2)).andExpect(jsonPath("$.slots[0].slotId").value(slotId));
+        mockMvc.perform(get("/api/v1/slots").param("doctorId", doctor).param("limit", "1").param("page", "2"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.page").value(2))
+                .andExpect(jsonPath("$.searchEndDate").value(secondDate.toString()))
+                .andExpect(jsonPath("$.slots[0].appointmentDate").value(secondDate.toString()));
+        mockMvc.perform(get("/api/v1/slots").param("doctorId", doctor).param("date", excluded.toString()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalCount").value(0));
+        mockMvc.perform(get("/api/v1/slots/window"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.searchEndDate").value(secondDate.toString()));
+        var boundary = new SlotCriteria(departmentId, null, doctorId, null, secondDate, null, 20);
+        var after = new SlotCriteria(departmentId, null, doctorId, null, excluded, null, 20);
+        assertThat(slotQueryService.searchStrict(boundary).slots()).hasSize(1);
+        assertThat(slotQueryService.searchStrict(after).slots()).isEmpty();
+        assertThat(slotQueryService.searchWithFallback(after).slots()).isEmpty();
+        var session = login(fixtureUsername, DEMO_A_PASSWORD);
+        mockMvc.perform(postAs(session, "/api/v1/tasks/" + taskId.value() + "/requirements")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(json.writeValueAsString(Map.of("departmentId", departmentId, "appointmentDate", excluded.toString()))))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.error").value("当前可查询至 " + secondDate + "，请在范围内选择日期。"));
+    }
+
+    @Test
+    void patientOverviewFindsTheNextVisitOutsideTheFirstTwentyRecentRecords() throws Exception {
+        String sql = """
+                INSERT INTO appointment(appointment_no, patient_id, department_id, doctor_id, slot_id,
+                                        status, booked_via, idempotency_key, confirmed_version, booked_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'PORTAL', ?, 0, ?)
+                """;
+        String numberPrefix = "OVERVIEW-" + patientId + "-";
+        jdbc.update(sql, numberPrefix + "NEXT", patientId, departmentId, doctorId, slotId, "BOOKED",
+                "overview-next", "2025-01-01 00:00:00");
+        for (int index = 1; index <= 22; index++) {
+            jdbc.update(sql, numberPrefix + index, patientId, departmentId, doctorId, slotId, "CANCELLED",
+                    "overview-" + index, "2025-01-02 00:00:00");
+        }
+        var session = login(fixtureUsername, DEMO_A_PASSWORD);
+        String overview = "/api/v1/appointments/mine/overview";
+        mockMvc.perform(get(overview).session(session))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.next.appointmentNo").value(numberPrefix + "NEXT"))
+                .andExpect(jsonPath("$.upcoming.totalCount").value(0))
+                .andExpect(jsonPath("$.history.totalCount").value(22))
+                .andExpect(jsonPath("$.history.items.length()").value(20));
+        mockMvc.perform(get(overview).session(session).param("historyPage", "2"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.history.page").value(2))
+                .andExpect(jsonPath("$.history.items.length()").value(2))
+                .andExpect(jsonPath("$.history.items[1].appointmentNo").value(numberPrefix + "1"));
+        var other = login("demo-patient", DEMO_A_PASSWORD);
+        var otherResponse = mockMvc.perform(get(overview).session(other)).andExpect(status().isOk()).andReturn();
+        assertThat(otherResponse.getResponse().getContentAsString()).doesNotContain(numberPrefix);
+    }
+
+    @Test
+    void patientCanListAndRestoreOnlyTheirOwnGuideConversations() throws Exception {
+        var current = login(fixtureUsername, DEMO_A_PASSWORD);
+        var other = login("demo-patient", DEMO_A_PASSWORD);
+        String history = "/api/v1/tasks";
+        String firstMessage = "第一轮历史导诊验收";
+        runtime.handleMessage(taskId, principal, firstMessage);
+        var newer = taskApplication.createTask(principal, "另一轮合成会话");
+        mockMvc.perform(get(history)).andExpect(status().isUnauthorized());
+        mockMvc.perform(get(history).session(current)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(2))
+                .andExpect(jsonPath("$.items[0].taskId").value(newer.value()))
+                .andExpect(jsonPath("$.items[1].taskId").value(taskId.value()))
+                .andExpect(jsonPath("$.items[1].title").value(firstMessage));
+        mockMvc.perform(get(history + "/" + taskId.value()).session(current)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.turns[0].userMessage").value(firstMessage));
+        var otherHistory = mockMvc.perform(get(history).session(other)).andExpect(status().isOk()).andReturn();
+        assertThat(otherHistory.getResponse().getContentAsString()).doesNotContain(taskId.value(), newer.value());
+        mockMvc.perform(get(history + "/" + taskId.value()).session(other)).andExpect(status().isForbidden());
+    }
+
+    @Test
     void directoryOnlyPublishesActiveDepartmentsAndDoctors() {
         String disabledDepartment = "停用科室-" + patientId;
         jdbc.update("INSERT INTO department(code, name, status) VALUES (?, ?, 'DISABLED')",
@@ -686,7 +823,7 @@ class MySqlTaskStateStoreTest {
     }
 
     @Test
-    void patientSessionRequiresCredentialsAndCsrfAndIsInvalidatedOnLogout() throws Exception {
+    void patientSessionRequiresCredentialsAndCsrfAndClearsCredentialsOnLogout() throws Exception {
         mockMvc.perform(get("/api/v1/tasks/{taskId}", taskId.value())
                         .header("X-Demo-User-Id", String.valueOf(patientId)))
                 .andExpect(status().isUnauthorized());
@@ -718,7 +855,6 @@ class MySqlTaskStateStoreTest {
                 .andExpect(status().isForbidden());
         mockMvc.perform(postAs(authenticated, "/api/v1/auth/logout"))
                 .andExpect(status().isNoContent());
-        assertThat(authenticated.isInvalid()).isTrue();
         mockMvc.perform(get("/api/v1/auth/session").session(authenticated))
                 .andExpect(status().isUnauthorized());
     }
@@ -1152,7 +1288,7 @@ class MySqlTaskStateStoreTest {
 
         assertThat(result.success()).isTrue();
         assertThat(result.data()).containsEntry("confirmationRequired", true)
-                .containsEntry("cancelSupported", false).containsEntry("rescheduleSupported", false)
+                .containsEntry("cancelSupported", true).containsEntry("rescheduleSupported", true)
                 .containsEntry("syntheticData", true);
     }
 

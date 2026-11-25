@@ -15,6 +15,8 @@ import javax.sql.DataSource;
 import org.springframework.context.annotation.Profile;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
+import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Reads bookable slots for both callers that need them.
@@ -27,11 +29,16 @@ import org.springframework.stereotype.Service;
  */
 @Service
 @Profile("mysql")
-public final class SlotQueryService {
+public class SlotQueryService {
     public static final int DEFAULT_LIMIT = 20;
     public static final int MAX_LIMIT = 50;
     /** How far ahead the synthetic hospital publishes clinics. */
-    public static final int SEARCH_HORIZON_DAYS = 90;
+    public static final int SCHEDULE_HORIZON_DAYS = 90;
+
+    public static final int PATIENT_WINDOW_DAYS = 28;
+
+    public record PortalPage(List<AvailableSlot> slots, LocalDate startDate, LocalDate endDate,
+                             int page, int totalCount, int totalPages) {}
 
     private static final ZoneId HOSPITAL_ZONE = ZoneId.of("Asia/Shanghai");
     private static final List<String> PERIODS = List.of("MORNING", "AFTERNOON", "EVENING");
@@ -46,15 +53,37 @@ public final class SlotQueryService {
 
     /** The hospital's current date. Search windows and date parsing both start from here. */
     public LocalDate today() {
-        return LocalDate.now(clock.withZone(HOSPITAL_ZONE));
+        return hospitalDate(clock.instant());
+    }
+
+    static LocalDate hospitalDate(java.time.Instant now) {
+        return now.atZone(HOSPITAL_ZONE).toLocalDate();
+    }
+
+    public static LocalDate patientWindowEnd(LocalDate today) {
+        return today.plusDays(PATIENT_WINDOW_DAYS - 1);
     }
 
     /** Only what the caller asked for: an exact match or nothing. */
     public SlotSearch searchStrict(SlotCriteria criteria) {
         LocalDate today = today();
-        LocalDate until = today.plusDays(SEARCH_HORIZON_DAYS);
+        LocalDate until = patientWindowEnd(today);
         return new SlotSearch(query(criteria, today, until), true,
                 criteria.appointmentDate(), criteria.clinicPeriod(), until);
+    }
+
+    @Transactional(readOnly = true, isolation = Isolation.REPEATABLE_READ)
+    public PortalPage searchPortal(SlotCriteria criteria, int requestedPage) {
+        LocalDate from = today();
+        LocalDate until = patientWindowEnd(from);
+        List<Object> params = new ArrayList<>();
+        String source = matchingSlots(criteria, from, until, null, params);
+        int total = jdbc.queryForObject("SELECT COUNT(*) " + source, Integer.class, params.toArray());
+        int size = criteria.limit();
+        int totalPages = (int) ((total + (long) size - 1) / size);
+        int page = Math.min(requestedPage, Math.max(1, totalPages));
+        List<AvailableSlot> slots = total == 0 ? List.of() : fetch(source, params, size, (long) (page - 1) * size);
+        return new PortalPage(slots, from, until, page, total, totalPages);
     }
 
     /**
@@ -64,7 +93,7 @@ public final class SlotQueryService {
      */
     public SlotSearch searchWithFallback(SlotCriteria criteria) {
         LocalDate today = today();
-        LocalDate until = today.plusDays(SEARCH_HORIZON_DAYS);
+        LocalDate until = patientWindowEnd(today);
         List<AvailableSlot> slots = query(criteria, today, until);
         boolean exactMatch = !slots.isEmpty();
         if (slots.isEmpty() && (criteria.appointmentDate() != null || criteria.clinicPeriod() != null)) {
@@ -114,15 +143,18 @@ public final class SlotQueryService {
     public Optional<AvailableSlot> findAvailable(long slotId) {
         LocalDate today = today();
         return query(new SlotCriteria(null, null, null, null, null, null, 1),
-                today, today.plusDays(SEARCH_HORIZON_DAYS), slotId).stream().findFirst();
+                today, patientWindowEnd(today), slotId).stream().findFirst();
     }
 
     private List<AvailableSlot> query(SlotCriteria criteria, LocalDate from, LocalDate until, Long slotId) {
+        List<Object> params = new ArrayList<>();
+        String source = matchingSlots(criteria, from, until, slotId, params);
+        return fetch(source, params, Math.min(Math.max(criteria.limit(), 1), MAX_LIMIT), 0);
+    }
+
+    private String matchingSlots(SlotCriteria criteria, LocalDate from, LocalDate until, Long slotId,
+                                 List<Object> params) {
         StringBuilder sql = new StringBuilder("""
-                SELECT s.id AS slot_id, d.id AS department_id, d.code AS department_code,
-                       d.name AS department_name, dr.id AS doctor_id, dr.name AS doctor_name,
-                       dr.title AS doctor_title, ds.schedule_date, ds.clinic_period,
-                       s.start_at, s.end_at
                 FROM appointment_slot s
                 JOIN doctor_schedule ds ON ds.id = s.schedule_id
                 JOIN doctor dr ON dr.id = ds.doctor_id
@@ -134,7 +166,6 @@ public final class SlotQueryService {
                   AND s.start_at > ?
                   AND ds.schedule_date BETWEEN ? AND ?
                 """);
-        List<Object> params = new ArrayList<>();
         params.add(Timestamp.from(Instant.now(clock)));
         params.add(from);
         params.add(until);
@@ -167,10 +198,19 @@ public final class SlotQueryService {
             sql.append(" AND ds.clinic_period = ?");
             params.add(criteria.clinicPeriod());
         }
-        sql.append(" ORDER BY ds.schedule_date, s.start_at, dr.id, s.slot_no LIMIT ?");
-        params.add(Math.min(Math.max(criteria.limit(), 1), MAX_LIMIT));
+        return sql.toString();
+    }
 
-        return jdbc.query(sql.toString(), (result, rowNum) -> new AvailableSlot(
+    private List<AvailableSlot> fetch(String source, List<Object> params, int limit, long offset) {
+        String select = """
+                SELECT s.id AS slot_id, d.id AS department_id, d.code AS department_code,
+                       d.name AS department_name, dr.id AS doctor_id, dr.name AS doctor_name,
+                       dr.title AS doctor_title, ds.schedule_date, ds.clinic_period,
+                       s.start_at, s.end_at
+                """;
+        params.add(limit);
+        params.add(offset);
+        return jdbc.query(select + source + " ORDER BY ds.schedule_date, s.start_at, dr.id, s.slot_no, s.id LIMIT ? OFFSET ?", (result, rowNum) -> new AvailableSlot(
                 result.getLong("slot_id"),
                 result.getLong("department_id"),
                 result.getString("department_code"),

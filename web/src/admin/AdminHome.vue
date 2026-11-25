@@ -56,7 +56,7 @@ function refresh() {
   </header>
 
   <p v-if="expired" class="admin-form-error" role="alert">
-    管理员会话已失效。<RouterLink class="admin-text-link" :to="{ name: 'admin-login', query: { next: '/admin' } }">重新登录</RouterLink>
+    管理员会话已失效。<RouterLink class="admin-text-link" :to="{ name: 'admin-login' }">重新登录</RouterLink>
   </p>
   <section class="admin-panel workbench-knowledge" aria-labelledby="workbench-knowledge">
     <header class="admin-panel-toolbar">

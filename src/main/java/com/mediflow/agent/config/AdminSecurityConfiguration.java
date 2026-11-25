@@ -34,6 +34,7 @@ public class AdminSecurityConfiguration {
     @Order(1)
     SecurityFilterChain adminSecurityFilterChain(HttpSecurity http, JdbcTemplate jdbc,
                                                  PasswordEncoder passwords) throws Exception {
+        RoleSession.configure(http, "ADMIN");
         var provider = new DaoAuthenticationProvider(passwords);
         provider.setUserDetailsService(username -> jdbc.query("""
                 SELECT id, username, password_hash, display_name, status
@@ -60,7 +61,6 @@ public class AdminSecurityConfiguration {
                             return logoutPath.matches(request) && authentication != null
                                     && authentication.getPrincipal() instanceof AdminAccount;
                         })
-                        .deleteCookies("JSESSIONID")
                         .logoutSuccessHandler((request, response, authentication) -> response.setStatus(SC_NO_CONTENT)))
                 .build();
     }

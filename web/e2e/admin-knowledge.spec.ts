@@ -55,7 +55,7 @@ async function mockAdminApi(page: Page, initialRole: 'patient' | 'admin' | 'anon
     const workbench = path.endsWith('/knowledge/documents') ? undefined : emptyWorkbenchResponse(url)
     if (workbench) return route.fulfill({ json: workbench })
     if (path === '/api/v1/admin/auth/session' && method === 'GET') {
-      if (role !== 'admin') return route.fulfill({ status: role === 'patient' ? 403 : 401 })
+      if (role !== 'admin') return route.fulfill({ status: 401 })
       return route.fulfill({ json: { adminId: '200', displayName: '资料管理员' } })
     }
     if (path === '/api/v1/admin/auth/csrf' && method === 'GET') {
@@ -180,14 +180,16 @@ test('管理员从独立登录进入工作台，核对可引用、索引失败�
   expect(unexpected).toEqual([])
 })
 
-test('患者会话被拒绝，管理员登录后回到原本的管理端深链接', async ({ page }) => {
+test('未登录访问管理子页时，成功登录后固定进入工作台', async ({ page }) => {
   const unexpected = await mockAdminApi(page, 'patient')
   await page.goto('/admin/knowledge/RULE-001?version=1')
-  await expect(page.getByText(/当前是患者会话/)).toBeVisible()
+  await expect(page).toHaveURL(/\/admin\/login/)
   await fillLogin(page, 'test-patient')
   await expect(page.getByRole('alert')).toHaveText('登录失败，请核对管理员账号和密码。')
   await fillLogin(page)
-  await expect(page).toHaveURL(/\/admin\/knowledge\/RULE-001\?version=1$/)
+  await expect(page).toHaveURL('/admin')
+  await expect(page.getByRole('heading', { name: '欢迎，资料管理员' })).toBeVisible()
+  await page.goto('/admin/knowledge/RULE-001?version=1')
   await expect(page.getByText('此版本已归档，患者新问答不可引用')).toBeVisible()
   expect(unexpected).toEqual([])
 })

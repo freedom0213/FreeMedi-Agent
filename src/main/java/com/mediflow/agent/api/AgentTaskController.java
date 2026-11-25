@@ -29,6 +29,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -147,6 +148,13 @@ public class AgentTaskController {
             @AuthenticationPrincipal(expression = "patient") Principal principal,
             @Valid @RequestBody SelectionRequest request) {
         return runtime.selectCandidate(new TaskId(taskId), principal, request.batchId(), request.slotId());
+    }
+
+    @GetMapping
+    public MySqlTaskApplicationService.GuideHistory listTasks(
+            @AuthenticationPrincipal(expression = "patient") Principal principal,
+            @RequestParam(required = false) Long before) {
+        return tasks.guideHistory(principal, before);
     }
 
     @GetMapping("/{taskId}")

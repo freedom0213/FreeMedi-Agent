@@ -14,7 +14,7 @@
     <groupId>com.mediflow</groupId>
     <artifactId>mediflow-agent</artifactId>
     <version>0.1.0-SNAPSHOT</version>
-    <name>mediflow-agent</name>
+    <name>FreeMedi-Agent</name>
     <description>Constrained appointment orchestration agent for a simulated hospital</description>
 
     <properties>

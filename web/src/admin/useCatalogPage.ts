@@ -1,9 +1,9 @@
 import { ref, shallowRef, watch } from 'vue'
-import { adminHttpStatus, readCatalog, type CatalogKind } from '../api/admin'
+import { adminHttpStatus, readCatalog, type CatalogListKind } from '../api/admin'
 
 type Filters = Parameters<typeof readCatalog>[1]
 
-export function useCatalogPage<T>(kind: CatalogKind | 'schedules', initial: Omit<Filters, 'page'> = {}) {
+export function useCatalogPage<T>(kind: CatalogListKind, initial: Omit<Filters, 'page'> = {}) {
   const items = shallowRef<T[]>([])
   const filters = shallowRef<Filters>({ ...initial, page: 1 })
   const hasNext = ref(false)
@@ -18,7 +18,7 @@ export function useCatalogPage<T>(kind: CatalogKind | 'schedules', initial: Omit
     readCatalog<T>(kind, query, request.signal).then(result => {
       if (request.signal.aborted) return
       items.value = result.items
-      hasNext.value = result.hasNext
+      hasNext.value = result.hasNext ?? result.page < (result.totalPages ?? 1)
       totalPages.value = result.totalPages
       if (query.page > Math.max(1, result.totalPages ?? query.page)) {
         go(Math.max(1, result.totalPages ?? 1))

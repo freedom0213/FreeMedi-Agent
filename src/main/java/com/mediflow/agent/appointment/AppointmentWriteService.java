@@ -1,6 +1,9 @@
 package com.mediflow.agent.appointment;
 
+import java.sql.Timestamp;
+import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -96,15 +99,38 @@ public final class AppointmentWriteService {
             return new BookingResult(Outcome.EXISTING, appointmentNo, null, "预约已存在，已返回原预约");
         }
 
+        static BookingResult replay(String appointmentNo, String status) {
+            return switch (status) {
+                case "CANCELLED" -> new BookingResult(Outcome.REJECTED, appointmentNo, "APPOINTMENT_CANCELLED", "原预约已取消。");
+                case "RESCHEDULED" -> new BookingResult(Outcome.REJECTED, appointmentNo, "APPOINTMENT_RESCHEDULED",
+                        "原预约已改约，可从原预约详情查看新预约。");
+                default -> existing(appointmentNo);
+            };
+        }
+
         static BookingResult failure(String code, String message) {
             return new BookingResult(Outcome.REJECTED, null, code, message);
         }
     }
 
-    public record VerificationResult(boolean success, String message) {
+    public record VerificationResult(boolean success, String message, String code) {
+    }
+
+    public record RescheduleCommand(long patientId, String appointmentNo, long slotId, String idempotencyKey) {
+    }
+
+    public record LifecycleResult(boolean success, String code, String message) {
+        static LifecycleResult accepted(String message) {
+            return new LifecycleResult(true, null, message);
+        }
+
+        static LifecycleResult refused(String code, String message) {
+            return new LifecycleResult(false, code, message);
+        }
     }
 
     private final JdbcTemplate jdbc;
+    private final Clock clock;
     private final TransactionTemplate transactions;
     /**
      * Used only when the booking transaction is already rolling back, so the failure record cannot
@@ -112,7 +138,8 @@ public final class AppointmentWriteService {
      */
     private final TransactionTemplate failureAuditTransactions;
 
-    public AppointmentWriteService(DataSource dataSource, PlatformTransactionManager transactionManager) {
+    public AppointmentWriteService(DataSource dataSource, PlatformTransactionManager transactionManager, Clock clock) {
+        this.clock = clock;
         this.jdbc = new JdbcTemplate(dataSource);
         this.transactions = new TransactionTemplate(transactionManager);
         this.failureAuditTransactions = new TransactionTemplate(transactionManager);
@@ -138,44 +165,251 @@ public final class AppointmentWriteService {
         }
     }
 
+    public LifecycleResult cancel(String appointmentNo, long patientId) {
+        return transactions.execute(tx -> changeVisit(appointmentNo, patientId, patientId, false));
+    }
+
+    public LifecycleResult checkIn(String appointmentNo, long administratorId) {
+        return transactions.execute(tx -> changeVisit(appointmentNo, null, administratorId, true));
+    }
+
+    private LifecycleResult changeVisit(String appointmentNo, Long owner, long actor, boolean checkIn) {
+        var target = findVisit(appointmentNo, owner);
+        if (target == null) return LifecycleResult.refused("NOT_FOUND", "找不到这笔预约。");
+
+        // Match the booking and closing order. Read mutable status only after locking the inventory.
+        AppointmentAvailability.lockPatient(jdbc, target.patientId());
+        SlotPath path = findSlotPath(target.slotId());
+        String department = AppointmentAvailability.lockDepartment(jdbc, path.departmentId());
+        String doctor = AppointmentAvailability.lockDoctor(jdbc, path.departmentId(), path.doctorId());
+        String schedule = AppointmentAvailability.lockSchedule(jdbc, path.doctorId(), path.scheduleId());
+        var slot = lockVisitSlot(target.slotId());
+        String status = lockVisitStatus(target.id());
+        var now = clock.instant();
+        boolean clinicOpen = "ACTIVE".equals(department) && "ACTIVE".equals(doctor) && "OPEN".equals(schedule);
+
+        if (checkIn) {
+            if ("CHECKED_IN".equals(status)) return LifecycleResult.accepted("此预约已签到。");
+            if (!"BOOKED".equals(status) || !clinicOpen || !"RESERVED".equals(slot.status())) {
+                return LifecycleResult.refused("CHECK_IN_UNAVAILABLE", "当前预约无法签到，请核对预约和排班状态。");
+            }
+            if (now.isBefore(AppointmentTiming.checkInOpensAt(slot.start())) || !now.isBefore(slot.end())) {
+                return LifecycleResult.refused("CHECK_IN_OUTSIDE_WINDOW", "签到时间为预约开始前 30 分钟至预约时段结束前。");
+            }
+            jdbc.update("UPDATE appointment SET status = 'CHECKED_IN', checked_in_at = ? WHERE id = ?",
+                    Timestamp.from(now), target.id());
+        } else {
+            if ("CANCELLED".equals(status)) return LifecycleResult.accepted("此预约已取消。");
+            if (!"BOOKED".equals(status)) {
+                return LifecycleResult.refused("CANCEL_UNAVAILABLE", "当前预约无法线上取消，请联系分诊台。");
+            }
+            if (!now.isBefore(AppointmentTiming.cancellationDeadline(slot.date()))) {
+                return LifecycleResult.refused("CANCEL_CUTOFF_PASSED", "已过线上取消时间，请联系分诊台。");
+            }
+            jdbc.update("UPDATE appointment SET status = 'CANCELLED', cancelled_at = ? WHERE id = ?",
+                    Timestamp.from(now), target.id());
+            releaseVacantSlot(target.slotId(), slot, clinicOpen, now);
+        }
+        jdbc.update("""
+                INSERT INTO operation_audit_log(operation_no, patient_id, operator_type, operator_id,
+                    operation_type, target_type, target_id, result_status)
+                VALUES (?, ?, ?, ?, ?, 'APPOINTMENT', ?, 'SUCCEEDED')
+                """, "AUD-" + UUID.randomUUID().toString().replace("-", "").toUpperCase(), target.patientId(),
+                checkIn ? "ADMIN" : "PATIENT", actor, checkIn ? "APPOINTMENT_CHECK_IN" : "APPOINTMENT_CANCEL", target.id());
+        return LifecycleResult.accepted(checkIn ? "签到成功。" : "预约已取消。");
+    }
+
+    private VisitTarget findVisit(String number, Long patientId) {
+        String select = "SELECT id, patient_id, slot_id, booked_via FROM appointment WHERE appointment_no = ?";
+        return jdbc.query(select + (patientId == null ? "" : " AND patient_id = ?"),
+                (row, index) -> new VisitTarget(row.getLong("id"), row.getLong("patient_id"), row.getLong("slot_id"),
+                        row.getString("booked_via")),
+                patientId == null ? new Object[]{number} : new Object[]{number, patientId}).stream().findFirst().orElse(null);
+    }
+
+    private VisitSlot lockVisitSlot(long slotId) {
+        return jdbc.queryForObject("""
+                SELECT s.status, s.start_at, s.end_at, ds.schedule_date FROM appointment_slot s
+                JOIN doctor_schedule ds ON ds.id = s.schedule_id WHERE s.id = ? FOR UPDATE
+                """, (row, index) -> new VisitSlot(row.getString("status"), row.getTimestamp("start_at").toInstant(),
+                row.getTimestamp("end_at").toInstant(), row.getObject("schedule_date", LocalDate.class)), slotId);
+    }
+
+    private String lockVisitStatus(long appointmentId) {
+        return jdbc.queryForObject("SELECT status FROM appointment WHERE id = ? FOR UPDATE", String.class, appointmentId);
+    }
+
+    private void releaseVacantSlot(long slotId, VisitSlot slot, boolean clinicOpen, Instant now) {
+        if ("RESERVED".equals(slot.status()) && jdbc.queryForList("""
+                SELECT id FROM appointment WHERE slot_id = ? AND status IN ('BOOKED', 'CHECKED_IN') FOR UPDATE
+                """, Long.class, slotId).isEmpty()) {
+            jdbc.update("UPDATE appointment_slot SET status = ?, version = version + 1 WHERE id = ?",
+                    clinicOpen && now.isBefore(slot.start()) ? "AVAILABLE" : "CLOSED", slotId);
+        }
+    }
+
+    private record VisitTarget(long id, long patientId, long slotId, String bookedVia) {}
+    private record VisitSlot(String status, Instant start, Instant end, LocalDate date) {}
+
+    public BookingResult reschedule(RescheduleCommand command) {
+        try {
+            return transactions.execute(tx -> rescheduleInTransaction(command));
+        } catch (RuntimeException failure) {
+            try {
+                failureAuditTransactions.executeWithoutResult(tx -> {
+                    var original = findVisit(command.appointmentNo(), command.patientId());
+                    if (original != null) auditReschedule(command, original.id(), "FAILED", "INTERNAL_ERROR", null);
+                });
+            } catch (RuntimeException auditFailure) {
+                logger.warn("Could not audit failed reschedule: patient={} appointment={}",
+                        command.patientId(), command.appointmentNo(), auditFailure);
+            }
+            throw failure;
+        }
+    }
+
+    public Optional<BookingResult> lookupReschedule(RescheduleCommand command) {
+        var original = findVisit(command.appointmentNo(), command.patientId());
+        return original == null ? Optional.of(BookingResult.failure("NOT_FOUND", "找不到这笔预约。"))
+                : recordedReschedule(command, original.id());
+    }
+
+    private BookingResult rescheduleInTransaction(RescheduleCommand command) {
+        AppointmentAvailability.lockPatient(jdbc, command.patientId());
+        var original = findVisit(command.appointmentNo(), command.patientId());
+        if (original == null) return BookingResult.failure("NOT_FOUND", "找不到这笔预约。");
+        var previous = recordedReschedule(command, original.id());
+        if (previous.isPresent()) return previous.get();
+
+        var oldPath = findSlotPath(original.slotId());
+        var newPath = findSlotPath(command.slotId());
+        String department = AppointmentAvailability.lockDepartment(jdbc, oldPath.departmentId());
+        String doctor = AppointmentAvailability.lockDoctor(jdbc, oldPath.departmentId(), oldPath.doctorId());
+        String oldSchedule = AppointmentAvailability.lockSchedule(jdbc, oldPath.doctorId(), oldPath.scheduleId());
+        boolean sameDoctor = newPath != null && oldPath.doctorId() == newPath.doctorId()
+                && oldPath.departmentId() == newPath.departmentId();
+        // Both schedules are protected by the same doctor lock, also taken by booking and schedule closure.
+        String newSchedule = sameDoctor ? AppointmentAvailability.lockSchedule(jdbc, oldPath.doctorId(), newPath.scheduleId()) : null;
+        var oldSlot = lockVisitSlot(original.slotId());
+        var newSlot = "OPEN".equals(newSchedule) && command.slotId() != original.slotId()
+                ? lockVisitSlot(command.slotId()) : null;
+        String status = lockVisitStatus(original.id());
+        Instant now = clock.instant();
+        if (!"BOOKED".equals(status) || !"RESERVED".equals(oldSlot.status()) || !now.isBefore(oldSlot.end())) {
+            return rejectReschedule(command, original.id(), "ORIGINAL_UNAVAILABLE");
+        }
+        if (!now.isBefore(AppointmentTiming.cancellationDeadline(oldSlot.date()))) {
+            return rejectReschedule(command, original.id(), "RESCHEDULE_CUTOFF_PASSED");
+        }
+        if (command.slotId() == original.slotId()) return rejectReschedule(command, original.id(), "SAME_SLOT");
+        if (newPath != null && !sameDoctor) return rejectReschedule(command, original.id(), "DIFFERENT_DOCTOR");
+        var today = SlotQueryService.hospitalDate(now);
+        if (newSlot == null || !"ACTIVE".equals(department) || !"ACTIVE".equals(doctor)
+                || newSlot.date().isBefore(today) || newSlot.date().isAfter(SlotQueryService.patientWindowEnd(today))
+                || !now.isBefore(newSlot.start())) {
+            return rejectReschedule(command, original.id(), "SLOT_NOT_FOUND");
+        }
+        if (!reserveSlot(command.slotId())) return rejectReschedule(command, original.id(), "SLOT_UNAVAILABLE");
+
+        String replacement = newAppointmentNumber();
+        jdbc.update("""
+                INSERT INTO appointment(appointment_no, patient_id, department_id, doctor_id, slot_id,
+                                        booked_via, status, idempotency_key, confirmed_version, booked_at, rescheduled_from_id)
+                VALUES (?, ?, ?, ?, ?, ?, 'BOOKED', ?, 0, ?, ?)
+                """, replacement, command.patientId(), oldPath.departmentId(), oldPath.doctorId(),
+                command.slotId(), original.bookedVia(), "RESCHEDULE-" + UUID.randomUUID(), Timestamp.from(now), original.id());
+        jdbc.update("UPDATE appointment SET status = 'RESCHEDULED' WHERE id = ?", original.id());
+        releaseVacantSlot(original.slotId(), oldSlot, "OPEN".equals(oldSchedule), now);
+        auditReschedule(command, original.id(), "SUCCEEDED", null, command.idempotencyKey());
+        return new BookingResult(BookingResult.Outcome.CREATED, replacement, null, "改约成功。");
+    }
+
+    private Optional<BookingResult> recordedReschedule(RescheduleCommand command, long originalId) {
+        return jdbc.query("""
+                SELECT audit.target_id = ? AND audit.request_digest = SHA2(CONCAT(?, ':', ?), 256) AS matches_request,
+                       audit.result_code, replacement.appointment_no
+                FROM operation_audit_log audit
+                LEFT JOIN appointment replacement ON replacement.rescheduled_from_id = audit.target_id
+                WHERE audit.patient_id = ? AND audit.operation_type = 'APPOINTMENT_RESCHEDULE'
+                  AND audit.idempotency_key = ?
+                ORDER BY audit.id LIMIT 1
+                """, (row, index) -> {
+                    if (!row.getBoolean("matches_request")) return keyConflict();
+                    String code = row.getString("result_code");
+                    return code != null ? rescheduleRejection(code)
+                            : new BookingResult(BookingResult.Outcome.EXISTING, row.getString("appointment_no"), null, "已核验这次改约。");
+                }, originalId, originalId, command.slotId(), command.patientId(), command.idempotencyKey()).stream().findFirst();
+    }
+
+    private BookingResult rejectReschedule(RescheduleCommand command, long originalId, String code) {
+        auditReschedule(command, originalId, "REJECTED", code, command.idempotencyKey());
+        return rescheduleRejection(code);
+    }
+
+    static BookingResult rescheduleRejection(String code) {
+        return BookingResult.failure(code, switch (code) {
+            case "ORIGINAL_UNAVAILABLE" -> "原预约状态已变化，请返回详情核对。";
+            case "RESCHEDULE_CUTOFF_PASSED" -> "已过线上改约时间。";
+            case "SAME_SLOT" -> "请选择与原预约不同的时段。";
+            case "DIFFERENT_DOCTOR" -> "请选择原科室、原医生的号源。";
+            case "SLOT_UNAVAILABLE" -> "该时段已被预约，本次改约未变更原预约。";
+            case "SLOT_NOT_FOUND" -> "所选时段已不可预约，本次改约未变更原预约。";
+            default -> "系统处理失败，本次改约未变更原预约。";
+        });
+    }
+
+    private void auditReschedule(RescheduleCommand command, long originalId, String result, String code, String key) {
+        jdbc.update("""
+                INSERT INTO operation_audit_log(operation_no, patient_id, operator_type, operator_id, operation_type,
+                                                target_type, target_id, idempotency_key, result_status, result_code, request_digest)
+                VALUES (?, ?, 'PATIENT', ?, 'APPOINTMENT_RESCHEDULE', 'APPOINTMENT', ?, ?, ?, ?, SHA2(CONCAT(?, ':', ?), 256))
+                """, UUID.randomUUID().toString(), command.patientId(), command.patientId(), originalId, key,
+                result, code, originalId, command.slotId());
+    }
+
     public VerificationResult verify(String appointmentNo, long patientId) {
         if (appointmentNo == null || appointmentNo.isBlank() || patientId <= 0) {
-            return new VerificationResult(false, "预约核验参数无效");
+            return new VerificationResult(false, "预约核验参数无效", null);
         }
-        Integer count = jdbc.queryForObject("""
-                SELECT COUNT(*) FROM appointment
-                WHERE appointment_no = ? AND patient_id = ? AND status = 'BOOKED'
-                """, Integer.class, appointmentNo, patientId);
-        return count != null && count == 1
-                ? new VerificationResult(true, "预约核验成功")
-                : new VerificationResult(false, "未找到预约记录");
+        String status = jdbc.queryForList("""
+                SELECT status FROM appointment WHERE appointment_no = ? AND patient_id = ?
+                """, String.class, appointmentNo, patientId).stream().findFirst().orElse(null);
+        if (status == null) return new VerificationResult(false, "未找到预约记录", null);
+        if ("CANCELLED".equals(status)) return new VerificationResult(false, "原预约已取消。", "APPOINTMENT_CANCELLED");
+        if ("RESCHEDULED".equals(status)) {
+            return new VerificationResult(false, "原预约已改约，可从原预约详情查看新预约。", "APPOINTMENT_RESCHEDULED");
+        }
+        return "BOOKED".equals(status) || "CHECKED_IN".equals(status)
+                ? new VerificationResult(true, "预约核验成功", null)
+                : new VerificationResult(false, "当前预约状态无法核验", null);
     }
 
     /** Reads the outcome of the exact original intent. This path never reserves or audits a new attempt. */
     public Optional<BookingResult> lookup(BookingCommand command) {
         var original = jdbc.query("""
-                SELECT a.appointment_no, a.booked_via, a.slot_id, p.plan_no, a.confirmed_version
+                SELECT a.appointment_no, a.booked_via, a.slot_id, p.plan_no, a.confirmed_version, a.status
                 FROM appointment a LEFT JOIN agent_plan p ON p.id = a.plan_id
                 WHERE a.patient_id = ? AND a.idempotency_key = ?
                 """, (row, index) -> new IntentRow(row.getString("appointment_no"),
                 row.getString("booked_via"), row.getLong("slot_id"), row.getString("plan_no"),
-                row.getInt("confirmed_version"), null), command.actor().userId(), command.idempotencyKey());
+                row.getInt("confirmed_version"), null, row.getString("status")), command.actor().userId(), command.idempotencyKey());
         if (!original.isEmpty()) {
             IntentRow row = original.get(0);
-            return Optional.of(row.matches(command) ? BookingResult.existing(row.appointmentNo()) : keyConflict());
+            return Optional.of(row.matches(command) ? BookingResult.replay(row.appointmentNo(), row.status()) : keyConflict());
         }
         return Optional.ofNullable(recordedRejection(command));
     }
 
     /** Older Agent checkpoints may lack the key. Only an appointment attached to that exact plan qualifies. */
     public Optional<BookingResult> lookupPlan(long patientId, PlanClaim plan) {
-        var rows = jdbc.queryForList("""
-                SELECT a.appointment_no FROM appointment a JOIN agent_plan p ON p.id = a.plan_id
+        var rows = jdbc.query("""
+                SELECT a.appointment_no, a.status FROM appointment a JOIN agent_plan p ON p.id = a.plan_id
                 WHERE a.patient_id = ? AND a.booked_via = 'AGENT' AND p.plan_no = ?
                   AND a.confirmed_version = ? AND p.version = ?
                 LIMIT 2
-                """, String.class, patientId, plan.planNo(), plan.version(), plan.version());
-        return rows.size() == 1 ? Optional.of(BookingResult.existing(rows.get(0))) : Optional.empty();
+                """, (row, index) -> BookingResult.replay(row.getString("appointment_no"), row.getString("status")),
+                patientId, plan.planNo(), plan.version(), plan.version());
+        return rows.size() == 1 ? Optional.of(rows.get(0)) : Optional.empty();
     }
 
     private BookingResult recordedRejection(BookingCommand command) {
@@ -188,7 +422,7 @@ public final class AppointmentWriteService {
                 ORDER BY audit.id LIMIT 1
                 """, (row, index) -> new IntentRow(null, row.getString("plan_no") == null ? "PORTAL" : "AGENT",
                 row.getLong("target_id"), row.getString("plan_no"), row.getInt("version"),
-                row.getString("result_code")), command.actor().userId(), command.idempotencyKey()).stream()
+                row.getString("result_code"), null), command.actor().userId(), command.idempotencyKey()).stream()
                 .findFirst().map(row -> row.matches(command)
                         ? BookingResult.failure(row.code(), "原预约未提交：" + rejectionMessage(row.code()))
                         : keyConflict()).orElse(null);
@@ -207,7 +441,7 @@ public final class AppointmentWriteService {
         };
     }
 
-    private record IntentRow(String appointmentNo, String source, long slotId, String planNo, int version, String code) {
+    private record IntentRow(String appointmentNo, String source, long slotId, String planNo, int version, String code, String status) {
         boolean matches(BookingCommand command) {
             return source.equals(command.source().name()) && (command.plan() == null
                     ? Objects.equals(slotId, command.slotId())
@@ -217,7 +451,7 @@ public final class AppointmentWriteService {
 
     private BookingResult bookInTransaction(BookingCommand command) {
         // Same patient and key must observe the first outcome even when two different slots are sent.
-        jdbc.queryForList("SELECT id FROM sys_user WHERE id = ? FOR UPDATE", Long.class, command.actor().userId());
+        AppointmentAvailability.lockPatient(jdbc, command.actor().userId());
         if (command.plan() != null) {
             PlanRow plan = findPlanForUpdate(command);
             if (plan == null) {
@@ -273,18 +507,11 @@ public final class AppointmentWriteService {
     /** Reserves the already locked slot and writes the appointment inside the caller's transaction. */
     private BookingResult reserveAndWrite(BookingCommand command, SlotRow slot,
                                           Long planRowId, int confirmedVersion) {
-        if (!"AVAILABLE".equals(slot.status())) {
-            return reject(command, "SLOT_UNAVAILABLE", "号源已被占用", planRowId, slot.id());
-        }
-        int reserved = jdbc.update("""
-                UPDATE appointment_slot SET status = 'RESERVED', version = version + 1
-                WHERE id = ? AND status = 'AVAILABLE'
-                """, slot.id());
-        if (reserved != 1) {
+        if (!"AVAILABLE".equals(slot.status()) || !reserveSlot(slot.id())) {
             return reject(command, "SLOT_UNAVAILABLE", "号源已被占用", planRowId, slot.id());
         }
 
-        String appointmentNo = "APT-" + UUID.randomUUID().toString().replace("-", "").toUpperCase();
+        String appointmentNo = newAppointmentNumber();
         jdbc.update("""
                 INSERT INTO appointment(appointment_no, patient_id, department_id, doctor_id, slot_id,
                                        plan_id, booked_via, status, idempotency_key, confirmed_version, booked_at)
@@ -299,6 +526,17 @@ public final class AppointmentWriteService {
         }
         insertAudit(command, "SUCCEEDED", null, "APPOINTMENT", appointmentId, planRowId);
         return BookingResult.created(appointmentNo);
+    }
+
+    private boolean reserveSlot(long slotId) {
+        return jdbc.update("""
+                UPDATE appointment_slot SET status = 'RESERVED', version = version + 1
+                WHERE id = ? AND status = 'AVAILABLE'
+                """, slotId) == 1;
+    }
+
+    private static String newAppointmentNumber() {
+        return "APT-" + UUID.randomUUID().toString().replace("-", "").toUpperCase();
     }
 
     /**
@@ -361,12 +599,12 @@ public final class AppointmentWriteService {
      */
     private BookingResult findExisting(BookingCommand command, Long planRowId, Long slotId) {
         List<ExistingRow> existing = jdbc.query("""
-                SELECT appointment_no, plan_id, slot_id, booked_via
+                SELECT appointment_no, plan_id, slot_id, booked_via, status
                 FROM appointment
                 WHERE patient_id = ? AND idempotency_key = ?
                 """, (result, rowNum) -> new ExistingRow(
                 result.getString("appointment_no"), result.getLong("plan_id"), result.getLong("slot_id"),
-                result.getString("booked_via")),
+                result.getString("booked_via"), result.getString("status")),
                 command.actor().userId(), command.idempotencyKey());
         if (existing.isEmpty()) {
             return null;
@@ -379,7 +617,7 @@ public final class AppointmentWriteService {
         if (planRowId == null && slotId != null && row.slotId() != slotId) {
             return reject(command, "IDEMPOTENCY_CONFLICT", "幂等键已用于其他号源", null, slotId);
         }
-        return BookingResult.existing(row.appointmentNo());
+        return BookingResult.replay(row.appointmentNo(), row.status());
     }
 
     private PlanRow findPlanForUpdate(BookingCommand command) {
@@ -400,14 +638,7 @@ public final class AppointmentWriteService {
         if (slotId == null) {
             return null;
         }
-        var path = jdbc.query("""
-                SELECT ds.id AS schedule_id, ds.doctor_id, d.department_id
-                FROM appointment_slot s
-                JOIN doctor_schedule ds ON ds.id = s.schedule_id
-                JOIN doctor d ON d.id = ds.doctor_id
-                WHERE s.id = ?
-                """, (row, index) -> new SlotPath(row.getLong("schedule_id"), row.getLong("doctor_id"),
-                row.getLong("department_id")), slotId).stream().findFirst().orElse(null);
+        var path = findSlotPath(slotId);
         if (path == null
                 || !"ACTIVE".equals(AppointmentAvailability.lockDepartment(jdbc, path.departmentId()))
                 || !"ACTIVE".equals(AppointmentAvailability.lockDoctor(jdbc, path.departmentId(), path.doctorId()))
@@ -424,6 +655,17 @@ public final class AppointmentWriteService {
                 .stream().findFirst().orElse(null);
     }
 
+    private SlotPath findSlotPath(long slotId) {
+        return jdbc.query("""
+                SELECT ds.id AS schedule_id, ds.doctor_id, d.department_id
+                FROM appointment_slot s
+                JOIN doctor_schedule ds ON ds.id = s.schedule_id
+                JOIN doctor d ON d.id = ds.doctor_id
+                WHERE s.id = ?
+                """, (row, index) -> new SlotPath(row.getLong("schedule_id"), row.getLong("doctor_id"),
+                row.getLong("department_id")), slotId).stream().findFirst().orElse(null);
+    }
+
     private record PlanRow(long id, long patientId, long departmentId, long doctorId, long slotId,
                            int version, String status, Instant expiresAt) {
     }
@@ -433,6 +675,6 @@ public final class AppointmentWriteService {
 
     private record SlotPath(long scheduleId, long doctorId, long departmentId) {}
 
-    private record ExistingRow(String appointmentNo, long planId, long slotId, String source) {
+    private record ExistingRow(String appointmentNo, long planId, long slotId, String source, String status) {
     }
 }

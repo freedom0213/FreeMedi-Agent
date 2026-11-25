@@ -70,7 +70,7 @@ watchEffect((invalidate) => {
     </div>
     <div v-else-if="state === 'session'" class="admin-empty" role="alert">
       <p>管理员会话已失效，请重新登录。</p>
-      <RouterLink class="admin-button" :to="{ name: 'admin-login', query: { next: $route.fullPath } }">重新登录</RouterLink>
+      <RouterLink class="admin-button" :to="{ name: 'admin-login' }">重新登录</RouterLink>
     </div>
     <div v-else-if="!matches.length" class="admin-empty" role="status">
       {{ rows.length ? '没有找到符合搜索条件的资料。' : '暂无院内资料。' }}

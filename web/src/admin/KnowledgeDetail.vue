@@ -79,7 +79,7 @@ function refreshDraft(message: string, issue = false) {
     </template>
     <template v-else-if="state === 'session'">
       <p role="alert">管理员会话已失效，请重新登录。</p>
-      <RouterLink class="admin-button" :to="{ name: 'admin-login', query: { next: route.fullPath } }">重新登录</RouterLink>
+      <RouterLink class="admin-button" :to="{ name: 'admin-login' }">重新登录</RouterLink>
     </template>
     <template v-else>
       <p role="alert">版本详情加载失败。</p>
