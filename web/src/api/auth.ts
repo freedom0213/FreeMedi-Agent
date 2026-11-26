@@ -24,7 +24,7 @@ function announceSessionChange() {
 
 export const patientSession = shallowRef<PatientSession | null>(null)
 
-const patientPaths = new Set(['/guide', '/booking', '/appointments'])
+const patientPaths = new Set(['/guide', '/booking', '/appointments', '/account/password'])
 
 export function loginTarget(value: unknown): string {
   if (typeof value !== 'string' || !value.startsWith('/')) return '/'
@@ -79,4 +79,11 @@ export async function logout() {
   await authHttp.post('/logout', undefined, { headers: await patientCsrfHeaders() })
   announceSessionChange()
   window.location.replace('/login')
+}
+
+export async function changePatientPassword(currentPassword: string, newPassword: string) {
+  await authHttp.post('/password', { currentPassword, newPassword }, { headers: await patientCsrfHeaders() })
+  patientSession.value = null
+  announceSessionChange()
+  window.location.replace('/login?reason=password-changed')
 }

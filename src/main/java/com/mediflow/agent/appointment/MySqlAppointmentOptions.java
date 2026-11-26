@@ -44,8 +44,8 @@ public final class MySqlAppointmentOptions implements AppointmentOptions {
         LocalDate today = slots.today();
         var date = AppointmentDateParser.parse(text(changes.containsKey("appointmentDate")
                 ? changes.get("appointmentDate") : saved.get("appointmentDate")), today);
-        if (date != null && (date.isBefore(today) || date.isAfter(SlotQueryService.patientWindowEnd(today)))) {
-            throw new IllegalArgumentException("当前可查询至 " + SlotQueryService.patientWindowEnd(today) + "，请在范围内选择日期。");
+        if (date != null && (date.isBefore(today) || date.isAfter(slots.patientWindowEnd(today)))) {
+            throw new IllegalArgumentException("当前可查询至 " + slots.patientWindowEnd(today) + "，请在范围内选择日期。");
         }
         String period = SlotQueryService.normalisePeriod(text(changes.containsKey("clinicPeriod")
                 ? changes.get("clinicPeriod") : saved.get("clinicPeriod")));

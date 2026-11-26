@@ -8,7 +8,7 @@ import AppointmentRequirementsForm from '../components/AppointmentRequirementsFo
 import KnowledgeSources from '../components/KnowledgeSources.vue'
 import { errorMessage } from '../api/http'
 import { listGuideHistory, type GuideConversation } from '../api/agent'
-import { cancellationNotice, getAppointment, periodLabel } from '../api/portal'
+import { cancellationNotice, getAppointment, periodLabel, visitOutcomeLabel } from '../api/portal'
 import { useAgentStore } from '../stores/agent'
 import type { KnowledgeReply, RequirementChanges, TaskStatus } from '../types/agent'
 
@@ -65,20 +65,27 @@ const isComplete = computed(() => taskStatus.value === 'COMPLETED' && !!agent.ta
 const verifiedAppointmentNo = computed(() => typeof agent.task?.facts.appointmentId === 'string'
   ? agent.task.facts.appointmentId : undefined)
 const actualBookingStatus = ref<string>()
+const actualVisitLabel = ref<string>()
 watch(verifiedAppointmentNo, (number, _, onCleanup) => {
   actualBookingStatus.value = undefined
+  actualVisitLabel.value = undefined
   if (!number) return
   let active = true
   onCleanup(() => { active = false })
   void getAppointment(number).then(record => {
-    if (active) actualBookingStatus.value = record.status
+    if (active) {
+      actualBookingStatus.value = record.status
+      actualVisitLabel.value = visitOutcomeLabel(record)
+    }
   }).catch(() => {
     // The appointment detail can be opened directly to retry.
   })
 }, { immediate: true })
 const bookingCompletion = computed(() => {
+  if (actualVisitLabel.value) return '原预约 · ' + actualVisitLabel.value
   if (actualBookingStatus.value === 'EXPIRED') return '原预约已过期'
   if (actualBookingStatus.value === 'CANCELLED') return '原预约已取消'
+  if (actualBookingStatus.value === 'INTERRUPTED') return '原预约已停诊'
   if (actualBookingStatus.value === 'RESCHEDULED') return '原预约已改约'
   if (actualBookingStatus.value === 'CHECKED_IN') return '原预约已签到'
   return actualBookingStatus.value === 'BOOKED' ? '预约已创建并核验' : '查看原预约状态'

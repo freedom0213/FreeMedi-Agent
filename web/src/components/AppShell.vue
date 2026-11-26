@@ -1,14 +1,19 @@
 <script setup lang="ts">
 import { RouterLink, useRoute } from 'vue-router'
 import { CircleHelp, Menu, Plus, X } from 'lucide-vue-next'
-import { ref, useTemplateRef } from 'vue'
+import { onMounted, ref, useTemplateRef } from 'vue'
 import { logout, patientSession } from '../api/auth'
+import { readHospital } from '../api/portal'
 
 const route = useRoute()
 const menuOpen = ref(false)
 const menuButton = useTemplateRef<HTMLButtonElement>('menuButton')
 const loggingOut = ref(false)
 const logoutError = ref('')
+const hospital = ref<Awaited<ReturnType<typeof readHospital>>>()
+onMounted(() => {
+  void readHospital().then(profile => { hospital.value = profile }).catch(() => {})
+})
 
 async function signOut() {
   loggingOut.value = true
@@ -76,9 +81,11 @@ const navItems = [
         </nav>
 
         <div class="header-tools">
-          <span class="environment-label"><span class="environment-dot" />演示环境</span>
+          <span v-if="hospital?.demo !== false" class="environment-label"><span class="environment-dot" />演示环境</span>
+          <span v-else-if="hospital.name" class="environment-label">{{ hospital.name }}</span>
           <template v-if="patientSession">
             <span class="profile-name">{{ patientSession.displayName }}</span>
+            <RouterLink class="profile-button" :to="{ name: 'patient-password' }">修改密码</RouterLink>
             <button class="profile-button" type="button" :disabled="loggingOut" @click="signOut">退出登录</button>
           </template>
           <RouterLink v-else-if="route.name !== 'login'" class="profile-button" to="/login">患者登录</RouterLink>
@@ -88,13 +95,15 @@ const navItems = [
 
     <main class="patient-page-content">
       <p v-if="logoutError" class="page-wrap" role="alert">{{ logoutError }}</p>
-      <slot />
+      <p v-if="hospital?.bookingEnabled === false" class="page-wrap" role="status">院方正在准备线上预约服务，请稍后再试。</p>
+      <slot :hospital="hospital" />
     </main>
 
     <footer class="site-footer">
       <div class="footer-inner">
         <span>FreeMedi-Agent</span>
-        <span class="synthetic-note">演示系统 · 医院、医生、号源及预约数据均为合成数据</span>
+        <span v-if="hospital?.demo !== false" class="synthetic-note">演示系统 · 医院、医生、号源及预约数据均为合成数据</span>
+        <span v-else-if="hospital.contact">{{ hospital.name }} · 门诊咨询 {{ hospital.contact }}</span>
         <a href="#service-note" class="help-link"><CircleHelp :size="15" />服务说明</a>
       </div>
     </footer>

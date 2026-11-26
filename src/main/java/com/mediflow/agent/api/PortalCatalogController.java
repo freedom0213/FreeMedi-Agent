@@ -5,6 +5,7 @@ import java.util.List;
 
 import com.mediflow.agent.appointment.AppointmentDateParser;
 import com.mediflow.agent.appointment.AvailableSlot;
+import com.mediflow.agent.appointment.HospitalRules;
 import com.mediflow.agent.appointment.MySqlHospitalDirectory;
 import com.mediflow.agent.appointment.SlotCriteria;
 import com.mediflow.agent.appointment.SlotQueryService;
@@ -28,18 +29,23 @@ public class PortalCatalogController {
 
     private final MySqlHospitalDirectory directory;
     private final SlotQueryService slotQuery;
+    private final HospitalRules rules;
 
-    public PortalCatalogController(MySqlHospitalDirectory directory, SlotQueryService slotQuery) {
+    public PortalCatalogController(MySqlHospitalDirectory directory, SlotQueryService slotQuery, HospitalRules rules) {
         this.directory = directory;
         this.slotQuery = slotQuery;
+        this.rules = rules;
     }
+
+    @GetMapping("/hospital")
+    public HospitalRules.PublicProfile hospital() { return rules.publicProfile(); }
 
     public record SearchWindow(LocalDate searchStartDate, LocalDate searchEndDate) {}
 
     @GetMapping("/slots/window")
     public SearchWindow searchWindow() {
         LocalDate today = slotQuery.today();
-        return new SearchWindow(today, SlotQueryService.patientWindowEnd(today));
+        return new SearchWindow(today, slotQuery.patientWindowEnd(today));
     }
 
     @GetMapping("/departments")

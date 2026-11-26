@@ -14,6 +14,8 @@ const failed = ref(false)
 const actions: Record<string, string> = {
   APPOINTMENT_CREATE: '创建预约', APPOINTMENT_CANCEL: '取消预约',
   APPOINTMENT_CHECK_IN: '办理签到', APPOINTMENT_RESCHEDULE: '改约',
+  APPOINTMENT_INTERRUPTED: '办理停诊', APPOINTMENT_ARRANGED: '登记停诊安排',
+  APPOINTMENT_VISITED: '登记已就诊', APPOINTMENT_VISIT_REVIEW: '复核就诊结果',
 }
 const operators: Record<string, string> = { PATIENT: '患者本人', ADMIN: '管理员', SYSTEM: '系统' }
 const results: Record<string, string> = { SUCCEEDED: '成功', REJECTED: '未成功', FAILED: '处理失败' }

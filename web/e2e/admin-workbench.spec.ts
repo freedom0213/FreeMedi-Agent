@@ -28,6 +28,12 @@ test('工作台摘要可定位到待发布、失败片段、今日排班和 AI �
     const path = url.pathname
     if (path === root + '/auth/session') return route.fulfill({ json: session })
     if (path === root + '/auth/csrf') return route.fulfill({ json: { ...session, headerName: 'X-CSRF-TOKEN', token: 'fixture' } })
+    if (path === root + '/appointments/interruption-pending/count') return route.fulfill({ json: { count: 2 } })
+    if (path === root + '/appointments') {
+      expect(url.searchParams.get('pendingArrangement')).toBe('true')
+      expect(url.searchParams.get('status')).toBe('INTERRUPTED')
+      return route.fulfill({ json: { items: [], page: 1, totalPages: 0 } })
+    }
     if (path === root + '/knowledge/documents') return route.fulfill({ json: [
       { document, versionCount: 2, draftVersion: 2 },
       { document: { ...document, docNo: 'DOC-02', title: '已发布资料' }, versionCount: 1, draftVersion: null },
@@ -87,6 +93,10 @@ test('工作台摘要可定位到待发布、失败片段、今日排班和 AI �
   await page.getByRole('button', { name: '刷新', exact: true }).click()
   await expect(page.getByRole('link', { name: /有效预约.*3 笔/ })).toBeVisible()
   await expect(page.getByRole('link', { name: /可预约余号.*4 个/ })).toBeVisible()
+  await page.getByRole('link', { name: /待安排的停诊预约.*2 笔/ }).click()
+  await expect(page.getByRole('combobox', { name: '预约状态' })).toHaveValue('PENDING_ARRANGEMENT')
+  await expect(page.getByText('没有符合条件的停诊待办。')).toBeVisible()
+  await page.getByRole('link', { name: '工作台首页' }).first().click()
 
   await page.getByRole('link', { name: /待发布文档/ }).click()
   await expect(page).toHaveURL(/\/admin\/knowledge\?status=DRAFT$/)

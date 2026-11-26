@@ -2,9 +2,12 @@
 import { computed, onUnmounted, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  agentSettingsError, closeSchedule, createSchedule, readCatalogOptions, readScheduleDetail,
+  adminHas, adminHttpStatus, adminSession, agentSettingsError, closeSchedule, confirmInterruption, createSchedule,
+  previewInterruption, readCatalogOptions, readInterruption, readScheduleDetail,
   type CatalogOption, type ClinicPeriod, type ScheduleDetail, type ScheduleRow,
+  type ScheduleInterruptionPreview, type ScheduleInterruptionResult,
 } from '../api/admin'
+import { formatHospitalDateTime } from '../api/portal'
 import { useCatalogPage } from './useCatalogPage'
 import PaginationBar from '../components/PaginationBar.vue'
 import { hospitalDay as localDate, queryCatalogId, queryDate } from './hospitalCalendar'
@@ -24,10 +27,13 @@ const from = ref(initial.from ?? '')
 const to = ref(initial.to ?? '')
 const status = ref(initial.status ?? '')
 const departments = shallowRef<CatalogOption[]>([])
+const scheduleDepartments = computed(() => departments.value.filter(item => adminHas('SCHEDULER', item.id)))
 const filterDoctors = shallowRef<CatalogOption[]>([])
 const draftDoctors = shallowRef<CatalogOption[]>([])
 const optionError = ref('')
 const optionRequest = new AbortController()
+const scheduleDays = computed(() => adminSession.value?.scheduleRules?.scheduleDays ?? 90)
+const patientDays = computed(() => adminSession.value?.scheduleRules?.patientDays ?? 28)
 onUnmounted(() => optionRequest.abort())
 
 void readCatalogOptions('departments', optionRequest.signal)
@@ -38,6 +44,8 @@ const busy = ref(false)
 const feedback = ref('')
 const problem = ref('')
 const closing = ref<ScheduleRow>()
+const stopping = ref<{ row: ScheduleRow; requestId: string; reason: string; impact?: ScheduleInterruptionPreview }>()
+const stopped = ref<{ row: ScheduleRow; result: ScheduleInterruptionResult }>()
 const detailId = ref<number>()
 const detail = shallowRef<ScheduleDetail>()
 const detailError = ref('')
@@ -183,6 +191,57 @@ async function confirmClose() {
     if (detailId.value === row.id) detailAttempt.value += 1
   }
 }
+
+async function requestStop(row: ScheduleRow) {
+  if (busy.value) return
+  const reason = stopping.value?.row.id === row.id ? stopping.value.reason : ''
+  stopping.value = { row, requestId: crypto.randomUUID(), reason }
+  stopped.value = undefined
+  draft.value = undefined
+  closing.value = undefined
+  problem.value = ''
+  busy.value = true
+  try {
+    stopping.value.impact = await previewInterruption(row.id)
+  } catch (error) {
+    problem.value = agentSettingsError(error)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function stop() {
+  const target = stopping.value
+  if (busy.value || !target?.impact || !target.reason.trim()) return
+  busy.value = true
+  problem.value = ''
+  try {
+    const result = await confirmInterruption(target.row.id, target.requestId, target.impact.token, target.reason.trim())
+    stopping.value = undefined
+    stopped.value = { row: target.row, result }
+    reload()
+    if (detailId.value === target.row.id) detailAttempt.value++
+  } catch (error) {
+    problem.value = agentSettingsError(error)
+    if (adminHttpStatus(error) === 409) target.impact = undefined
+  } finally {
+    busy.value = false
+  }
+}
+
+async function showStop(row: ScheduleRow) {
+  if (busy.value) return
+  busy.value = true
+  problem.value = ''
+  stopping.value = undefined
+  try {
+    stopped.value = { row, result: await readInterruption(row.id) }
+  } catch (error) {
+    problem.value = agentSettingsError(error)
+  } finally {
+    busy.value = false
+  }
+}
 </script>
 
 <template>
@@ -191,7 +250,7 @@ async function confirmClose() {
     <form class="catalog-filter" @submit.prevent="applyFilters">
       <label>科室<select v-model="departmentId" class="admin-input">
         <option value="">全部科室</option>
-        <option v-for="option in departments" :key="option.id" :value="option.id">{{ option.name }}</option>
+        <option v-for="option in scheduleDepartments" :key="option.id" :value="option.id">{{ option.name }}</option>
       </select></label>
       <label>医生<select v-model="doctorId" class="admin-input" :disabled="!departmentId">
         <option value="">全部医生</option>
@@ -213,17 +272,17 @@ async function confirmClose() {
     <p v-if="problem" class="admin-form-error catalog-message" role="alert">{{ problem }}</p>
     <form v-if="draft" class="catalog-editor" @submit.prevent="save">
       <h2>新增排班与号源</h2>
-      <p class="admin-muted">时间按北京时间填写，号源日期须在患者可查的未来 90 天内。</p>
+      <p class="admin-muted">时间按北京时间填写。管理端可排到今天之后第 {{ scheduleDays }} 天。患者查号范围为含当天在内的 {{ patientDays }} 天。</p>
       <fieldset class="catalog-fields" :disabled="busy">
         <label>排班科室<select v-model="draft.departmentId" class="admin-input" required>
           <option value="" disabled>选择科室</option>
-          <option v-for="option in departments.filter(item => item.status === 'ACTIVE')" :key="option.id" :value="option.id">{{ option.name }}</option>
+          <option v-for="option in scheduleDepartments.filter(item => item.status === 'ACTIVE')" :key="option.id" :value="option.id">{{ option.name }}</option>
         </select></label>
         <label>出诊医生<select v-model="draft.doctorId" class="admin-input" required :disabled="!draft.departmentId">
           <option value="" disabled>{{ draft.departmentId ? '选择医生' : '先选择科室' }}</option>
           <option v-for="option in draftDoctors" :key="option.id" :value="option.id">{{ option.name }}</option>
         </select></label>
-        <label>排班日期<input v-model="draft.date" class="admin-input" type="date" required :min="localDate(0)" :max="localDate(90)"></label>
+        <label>排班日期<input v-model="draft.date" class="admin-input" type="date" required :min="localDate(0)" :max="localDate(scheduleDays)"></label>
         <label>出诊时段<select v-model="draft.period" class="admin-input" @change="draft.start = periods[draft.period].defaultTime">
           <option v-for="(period, key) in periods" :key="key" :value="key">{{ period.label }}</option>
         </select></label>
@@ -241,6 +300,31 @@ async function confirmClose() {
         <button class="admin-button" type="button" :disabled="busy" @click="draft = undefined; problem = ''">取消</button>
       </div>
     </form>
+    <form v-if="stopping" class="catalog-editor" aria-label="办理停诊" @submit.prevent="stop">
+      <h2>办理停诊</h2>
+      <p>{{ stopping.row.departmentName }} · {{ stopping.row.doctorName }} · {{ stopping.row.scheduleDate }} {{ periods[stopping.row.clinicPeriod].label }}</p>
+      <p v-if="busy && !stopping.impact" role="status">正在核对预约…</p>
+      <template v-if="stopping.impact">
+        <p>首个号源 {{ formatHospitalDateTime(stopping.impact.firstStart) }}。影响 {{ stopping.impact.appointments.length }} 笔预约。</p>
+        <ul v-if="stopping.impact.appointments.length">
+          <li v-for="item in stopping.impact.appointments" :key="item.appointmentNo">{{ item.timeRange }} · {{ item.appointmentNo }}</li>
+        </ul>
+      </template>
+      <label>停诊原因（患者可见）<textarea v-model.trim="stopping.reason" class="admin-input" required maxlength="200" rows="3" :disabled="busy"></textarea></label>
+      <div class="catalog-actions">
+        <button v-if="stopping.impact" class="admin-button admin-button--primary" :disabled="busy || !stopping.reason">确认停诊</button>
+        <button v-else class="admin-button" type="button" :disabled="busy" @click="requestStop(stopping.row)">重新预览</button>
+        <button class="admin-button" type="button" :disabled="busy" @click="stopping = undefined">取消</button>
+      </div>
+    </form>
+    <section v-if="stopped" class="catalog-editor" aria-label="停诊记录">
+      <h2>停诊记录 · {{ stopped.row.doctorName }} · {{ stopped.row.scheduleDate }}</h2>
+      <p>{{ stopped.result.reason }}</p>
+      <p>{{ formatHospitalDateTime(stopped.result.stoppedAt) }} 办理 · 影响 {{ stopped.result.affected }} 笔预约</p>
+      <RouterLink v-if="stopped.result.affected" class="admin-text-link" :to="{ name: 'admin-appointments',
+        query: { scheduleId: stopped.row.id, status: 'INTERRUPTED' } }">核对停诊预约</RouterLink>
+      <button class="admin-button" type="button" @click="stopped = undefined">关闭记录</button>
+    </section>
     <section v-if="closing" class="catalog-editor" aria-label="关闭排班确认">
       <h2>关闭排班</h2>
       <p>{{ closing.doctorName }} · {{ closing.scheduleDate }} {{ periods[closing.clinicPeriod].label }}。
@@ -270,7 +354,7 @@ async function confirmClose() {
               <th scope="row">{{ row.doctorName }}<small>{{ row.departmentName }}</small></th>
               <td>{{ row.scheduleDate }}<small>{{ periods[row.clinicPeriod].label }}</small></td>
               <td>{{ row.slots }}</td><td>{{ row.remaining }}</td><td>{{ row.booked }}</td>
-              <td><span class="catalog-status" :data-active="row.status === 'OPEN'">{{ row.status === 'OPEN' ? '开放' : '已关闭' }}</span></td>
+              <td><span class="catalog-status" :data-active="row.status === 'OPEN'">{{ row.interrupted ? '已停诊' : row.status === 'OPEN' ? '开放' : '已关闭' }}</span></td>
               <td><div class="catalog-actions">
                 <button class="admin-button" type="button" :aria-expanded="detailId === row.id"
                   @click="detailId = detailId === row.id ? undefined : row.id">{{ detailId === row.id ? '收起号源' : '查看号源' }}</button>
@@ -280,6 +364,9 @@ async function confirmClose() {
                 } }">查看预约</RouterLink>
                 <button v-if="row.status === 'OPEN' && !row.booked" class="admin-button" type="button" :disabled="busy"
                   @click="requestClose(row)">关闭排班</button>
+                <button v-if="row.status === 'OPEN' && row.scheduleDate >= localDate(0)" class="admin-button" type="button"
+                  :disabled="busy" @click="requestStop(row)">办理停诊</button>
+                <button v-if="row.interrupted" class="admin-button" type="button" :disabled="busy" @click="showStop(row)">停诊记录</button>
               </div><small v-if="row.status === 'OPEN' && row.booked">已有 {{ row.booked }} 笔有效预约，无法关闭</small></td>
             </tr>
             <tr v-if="detailId === row.id" class="catalog-slot-row"><td colspan="7">

@@ -27,20 +27,21 @@ public class PatientSecurityConfiguration {
     @Bean
     UserDetailsService patientAccounts(JdbcTemplate jdbc) {
         return username -> jdbc.query("""
-                SELECT id, username, password_hash, display_name, status
+                SELECT id, username, password_hash, display_name, status, credential_version
                 FROM sys_user WHERE username = ? AND role = 'PATIENT'
                 """, (row, index) -> new PatientAccount(row.getLong("id"), row.getString("username"),
                 row.getString("password_hash"), row.getString("display_name"),
-                "ACTIVE".equals(row.getString("status"))), username)
+                "ACTIVE".equals(row.getString("status")), row.getLong("credential_version")), username)
                 .stream().findFirst().orElseThrow(() -> new UsernameNotFoundException("Patient not found"));
     }
 
     @Bean
-    SecurityFilterChain patientSecurityFilterChain(HttpSecurity http) throws Exception {
-        RoleSession.configure(http, "PATIENT");
+    SecurityFilterChain patientSecurityFilterChain(HttpSecurity http, AccountCredentials credentials) throws Exception {
+        RoleSession.configure(http, "PATIENT", credentials);
         return http.authorizeHttpRequests(authorize -> authorize
                         .dispatcherTypeMatchers(ERROR).permitAll()
                         .requestMatchers(HttpMethod.GET, "/api/v1/auth/csrf",
+                                "/api/v1/hospital",
                                 "/api/v1/departments", "/api/v1/departments/*/doctors", "/api/v1/slots", "/api/v1/slots/window").permitAll()
                         .requestMatchers("/api/**").hasRole("PATIENT")
                         .anyRequest().permitAll())

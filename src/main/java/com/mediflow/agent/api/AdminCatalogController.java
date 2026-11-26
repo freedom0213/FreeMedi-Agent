@@ -9,6 +9,9 @@ import com.mediflow.agent.appointment.AdminCatalogService.Page;
 import com.mediflow.agent.appointment.AdminCatalogService.Period;
 import com.mediflow.agent.appointment.AdminCatalogService.Schedule;
 import com.mediflow.agent.appointment.AdminCatalogService.ScheduleDetail;
+import com.mediflow.agent.config.AdminAccess;
+import com.mediflow.agent.config.AdminAccess.Role;
+import com.mediflow.agent.config.AdminSecurityConfiguration.AdminAccount;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -21,6 +24,7 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -42,9 +46,11 @@ import java.util.Map;
 @RequestMapping("/api/v1/admin/catalog")
 public class AdminCatalogController {
     private final AdminCatalogService catalog;
+    private final AdminAccess access;
 
-    public AdminCatalogController(AdminCatalogService catalog) {
+    public AdminCatalogController(AdminCatalogService catalog, AdminAccess access) {
         this.catalog = catalog;
+        this.access = access;
     }
 
     @GetMapping("/departments")
@@ -55,7 +61,11 @@ public class AdminCatalogController {
     }
 
     @GetMapping("/departments/options")
-    public List<CatalogOption> departmentOptions() { return catalog.departmentOptions(); }
+    public List<CatalogOption> departmentOptions(@AuthenticationPrincipal AdminAccount admin) {
+        var grants = access.permissions(admin);
+        return grants.has(Role.SYSTEM_ADMIN) ? catalog.departmentOptions()
+                : catalog.departmentOptions(grants.scope(Role.SCHEDULER, Role.TRIAGE, Role.VISIT_SUPERVISOR));
+    }
 
     @PostMapping("/departments")
     @ResponseStatus(HttpStatus.CREATED)
@@ -84,7 +94,9 @@ public class AdminCatalogController {
     }
 
     @GetMapping("/doctors/options")
-    public List<CatalogOption> doctorOptions(@RequestParam long departmentId) {
+    public List<CatalogOption> doctorOptions(@AuthenticationPrincipal AdminAccount admin, @RequestParam long departmentId) {
+        var grants = access.permissions(admin);
+        if (!grants.has(Role.SYSTEM_ADMIN)) grants.scope(Role.SCHEDULER, Role.TRIAGE, Role.VISIT_SUPERVISOR).require(departmentId);
         return catalog.doctorOptions(departmentId);
     }
 
@@ -107,29 +119,36 @@ public class AdminCatalogController {
     }
 
     @GetMapping("/schedules")
-    public Page<Schedule> schedules(@RequestParam(required = false) Long departmentId,
+    public Page<Schedule> schedules(@AuthenticationPrincipal AdminAccount admin, @RequestParam(required = false) Long departmentId,
                                     @RequestParam(required = false) Long doctorId,
                                     @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
                                     @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
                                     @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to,
                                     @RequestParam(required = false) String status,
                                     @RequestParam(defaultValue = "1") int page) {
-        return catalog.schedules(departmentId, doctorId, date, from, to, status, page);
+        return catalog.schedules(departmentId, doctorId, date, from, to, status, page, access.permissions(admin).scope(Role.SCHEDULER));
     }
 
     @GetMapping("/schedules/{id}")
-    public ScheduleDetail schedule(@PathVariable long id) { return catalog.schedule(id); }
+    public ScheduleDetail schedule(@AuthenticationPrincipal AdminAccount admin, @PathVariable long id) {
+        access.permissions(admin).scope(Role.SCHEDULER).require(catalog.departmentForSchedule(id));
+        return catalog.schedule(id);
+    }
 
     @PostMapping("/schedules")
     @ResponseStatus(HttpStatus.CREATED)
-    public void createSchedule(@Valid @RequestBody ScheduleInput input) {
+    public void createSchedule(@AuthenticationPrincipal AdminAccount admin, @Valid @RequestBody ScheduleInput input) {
+        access.permissions(admin).scope(Role.SCHEDULER).require(input.departmentId());
         catalog.createSchedule(input.departmentId(), input.doctorId(), input.date(), input.period(),
                 input.start(), input.minutes(), input.count());
     }
 
     @PostMapping("/schedules/{id}/close")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void closeSchedule(@PathVariable long id) { catalog.closeSchedule(id); }
+    public void closeSchedule(@AuthenticationPrincipal AdminAccount admin, @PathVariable long id) {
+        access.permissions(admin).scope(Role.SCHEDULER).require(catalog.departmentForSchedule(id));
+        catalog.closeSchedule(id);
+    }
 
     @ExceptionHandler(CatalogProblem.class)
     ResponseEntity<Map<String, String>> catalogProblem(CatalogProblem error) {

@@ -4,6 +4,40 @@ import { expect, guideNumber, guideRequest, guideTaskId, portalNumber, test, vis
 const detailUrl = (number: string) => '/appointments?appointmentNo=' + number
 const preparationUrl = (number: string) => '/appointments/' + number + '/preparation'
 
+test('预约通知进入原预约，只将点开的更新标为已读', async ({ page, patientApi }) => {
+  const record = patientApi.seedAppointment()
+  record.status = 'INTERRUPTED'
+  record.interruption = { reason: '演示停诊原因', at: '2026-11-19T04:00:00Z', outcome: 'REBOOK', arrangement: '请另选号源。' }
+  const notice = { appointmentNo: record.appointmentNo, occurredAt: record.interruption.at,
+    departmentName: record.departmentName, doctorName: record.doctorName, appointmentDate: record.appointmentDate }
+  const unread = new Set(['STOPPED', 'ARRANGEMENT'])
+  await page.route('**/api/v1/appointment-notifications**', route => {
+    if (route.request().method() === 'POST') {
+      expect(new URL(route.request().url()).pathname).toBe('/api/v1/appointment-notifications/' + record.appointmentNo + '/read')
+      unread.delete(route.request().postDataJSON().kind)
+      return route.fulfill({ status: 204 })
+    }
+    return route.fulfill({ json: { page: 1, totalPages: 1, unreadCount: unread.size,
+      items: ['ARRANGEMENT', 'STOPPED'].map(kind => ({ ...notice, kind, unread: unread.has(kind) })) } })
+  })
+  await page.goto('/')
+  const inbox = page.getByRole('region', { name: '预约通知' })
+  await expect(inbox.getByText('2 条未读')).toBeVisible()
+  await inbox.getByRole('link', { name: /停诊安排更新/ }).click()
+  await expect(page.getByRole('heading', { name: '预约详情' })).toBeVisible()
+  await expect(page.getByText('请另选号源。')).toBeVisible()
+  await page.getByRole('link', { name: '返回预约列表' }).click()
+  await expect(inbox.getByText('1 条未读')).toBeVisible()
+  await page.reload()
+  await expect(inbox.getByText('1 条未读')).toBeVisible()
+  await expect(inbox.getByRole('link', { name: /门诊停诊.*未读/ })).toBeVisible()
+  await inbox.getByRole('link', { name: /门诊停诊/ }).click()
+  await expect(page.getByText('演示停诊原因')).toBeVisible()
+  await page.getByRole('link', { name: '返回预约列表' }).click()
+  await expect(inbox.getByText(/d 条未读/)).toHaveCount(0)
+  await expect(inbox.getByRole('link', { name: /门诊停诊/ })).toBeVisible()
+})
+
 test('普通挂号筛选、换号确认后可以打开原预约和就诊准备', async ({ page, patientApi }) => {
   await page.goto('/')
   await page.getByRole('link', { name: '呼吸内科', exact: true }).click()

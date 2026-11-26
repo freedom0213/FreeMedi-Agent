@@ -66,9 +66,34 @@ Windows 上的 Qdrant 在一次适配器测试删除集合时返回了系统错�
 | A17 | 按任务查看 DeepSeek 决策、工具结果和耗时、预约写入与核验。流式回复与最终保存内容一致。 |
 | A18 | 空 MySQL、空向量集合和新目录依赖安装按下述流程验证。保留启动步骤、证据、演示流程及可核对项目描述。 |
 
+## 2026-11-26 主分支干净环境验收
+
+从 GitHub `main` 克隆 [`b75241c`](https://github.com/freedom0213/FreeMedi-Agent/commit/b75241c1fae5bce7797de6ec4f2eb0471dbbee0b)，在新副本重新构建后端和前端，用 Chrome 158 验收。使用独立的 MySQL 数据目录、数据库及 Qdrant 存储目录。验收端口分别为 MySQL `13361`、Qdrant REST `16336`、后端 `18086` 和 Vite 预览 `4186`，预览的 `/api` 代理指向这次的后端。
+
+| 场景 | 实测结果 |
+| --- | --- |
+| 从零初始化 | 应用 Flyway V1–V12，预约表起始为空。导入 6 份演示资料并建立 30 个向量，索引失败和待处理均为零。用仓库脚本补齐近 14 天演示号源。 |
+| 双端登录 | 在同一个 Chrome 浏览器配置中打开「我的预约」和管理端工作台。两端会话同时有效。 |
+| 同一条预约链 | 管理端为同一医生创建两条排班，各开放一个号源。患者挂未来排班的号，再改到距开始约 20 分钟的可用时段。旧号回库，新号被占用，新旧预约详情可互查。 |
+| 签到与追溯 | 从新排班的「查看预约」进入预约明细，办理现场签到。两端都显示「已签到」，患者的取消、改约入口收起。管理端可按两个预约编号核对创建、改约和签到记录。 |
+| 重启恢复 | 重启 MySQL、Qdrant、Spring Boot 和 Vite 预览。用原账号重新登录后，两条预约记录及关联、操作时间和号源状态与重启前一致。Flyway 校验 12 个迁移，无重复执行。 |
+| 配置恢复 | 重启后「查询预约规则」工具的独立超时仍为 2.345 秒，合成模型草稿及其版本仍在，6 份资料和 30 个向量完整保留。模型保持规则演示模式，草稿未测试、未启用。 |
+
+复验签到时，可将新号的开始时间设在当前北京时间之后约 20 分钟，且结束时间仍在所选排班时段内。改约成功后及时打开管理端对应排班办理签到。签到窗口从预约开始前 30 分钟开放，到预约时段结束时截止。
+
+排班新增表单目前仍把 90 天写成患者可查范围。实际口径为管理端可排到今天之后第 90 天，患者普通挂号和智能导诊均按含当天的 28 天查号。
+
 ## Windows 本地启动
 
 实测环境为 JDK 17.0.19、Maven 3.9.4、Node 24.13、pnpm 10.34.8、MySQL 8.0.34 和 Qdrant 1.13.6。前端依赖使用仓库的 `web/pnpm-lock.yaml`。各命令从项目根目录执行。以下示例使用专用 MySQL 端口 `13317`、Qdrant 端口 `16333`、后端 `8080`、前端 `5173`。
+
+从 GitHub 主分支复验时，可先在新目录克隆，再从该副本运行以下步骤。
+
+```powershell
+git clone --branch main --single-branch https://github.com/freedom0213/FreeMedi-Agent.git freemedi-clean
+Set-Location freemedi-clean
+git rev-parse HEAD
+```
 
 **终端一启动独立 MySQL。** 已有专用演示 MySQL 可直接使用，并将后续端口及凭据替换为该实例的配置。
 
@@ -100,12 +125,9 @@ try {
 
 使用项目 [Docker Compose](../../docker-compose.yml) 也能启动 Qdrant。默认端口为 `6333`，后续命令中的 Qdrant URL 对应修改。Compose 路径没有在本轮重跑。
 
-**终端三初始化数据、资料索引并启动后端。** 命令里的空数据库密码只用于前述回环地址上的一次性实例。真实 DeepSeek 读取当前终端的 `DEEPSEEK_API_KEY`。现有配置无需变更。重建索引时将 `-Rebuild` 加到索引命令，确认它指向当前演示库和专用集合。
+**终端三初始化数据、资料索引并启动后端。** 示例使用前述回环地址上的专用 MySQL 实例。预约和签到验收可使用规则演示模式。有真实 DeepSeek 配置时，保留当前终端的 `DEEPSEEK_API_KEY`，并将下面的 `$demoModelArgs` 设为空数组。
 
 ```powershell
-if ([string]::IsNullOrWhiteSpace($env:DEEPSEEK_API_KEY)) {
-    throw '请先在当前 Windows 环境配置 DEEPSEEK_API_KEY'
-}
 $env:MEDIFLOW_DB_URL = 'jdbc:mysql://127.0.0.1:13317/mediflow_demo?useUnicode=true&characterEncoding=utf8&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true'
 $env:MEDIFLOW_DB_USERNAME = 'root'
 $env:MEDIFLOW_QDRANT_URL = 'http://127.0.0.1:16333'
@@ -114,22 +136,44 @@ $env:MEDIFLOW_KNOWLEDGE_INDEX = 'qdrant'
 $env:MEDIFLOW_EMBEDDING_PROVIDER = 'local'
 
 mysql.exe --no-defaults --host=127.0.0.1 --port=13317 --user=root --execute 'CREATE DATABASE IF NOT EXISTS mediflow_demo CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;'
+if ($LASTEXITCODE -ne 0) { throw '演示库创建失败' }
 mvn -q -DskipTests package
-./scripts/import-knowledge.ps1 -HostName 127.0.0.1 -Port 13317 -Database mediflow_demo -User root -Password ''
+if ($LASTEXITCODE -ne 0) { throw '后端打包失败' }
+
+$bootArgs = @('-jar', 'target/mediflow-agent-0.1.0-SNAPSHOT.jar', '--spring.profiles.active=mysql',
+    '--server.address=127.0.0.1', '--spring.datasource.password=')
+$demoModelArgs = @('--mediflow.llm.api-key=')
+
+java @bootArgs @demoModelArgs '--server.port=0' '--mediflow.knowledge.import=true'
+if ($LASTEXITCODE -ne 0) { throw '知识资料导入失败' }
 ./scripts/seed-demo-slots.ps1 -Port 13317 -Database mediflow_demo -User root -Password '' -Days 14
-./scripts/index-knowledge.ps1 -HostName 127.0.0.1 -Port 13317 -Database mediflow_demo -User root -Password '' -QdrantUrl $env:MEDIFLOW_QDRANT_URL
-java -jar target/mediflow-agent-0.1.0-SNAPSHOT.jar '--spring.profiles.active=mysql' '--spring.datasource.password='
+java @bootArgs @demoModelArgs '--server.port=0' '--mediflow.knowledge.index-run=true'
+if ($LASTEXITCODE -ne 0) { throw '知识索引构建失败' }
+
+$env:MEDIFLOW_ADMIN_USERNAME = 'local-admin'
+$adminPassword = Read-Host '设置本地管理员密码' -AsSecureString
+try {
+    $env:MEDIFLOW_ADMIN_PASSWORD = [System.Net.NetworkCredential]::new('', $adminPassword).Password
+    java @bootArgs @demoModelArgs
+} finally {
+    Remove-Item Env:MEDIFLOW_ADMIN_PASSWORD -ErrorAction SilentlyContinue
+    $adminPassword.Dispose()
+}
 ```
 
-首次导入会由 Flyway 初始化专用库。导入检查 `failed=0`，索引检查 `failed=0 stillPending=0`。隔天演示可以重新执行号源脚本，已有预约仍会保留。需要从零复演时为数据库和 Qdrant 集合分别取一个新的名字。
+首次导入会由 Flyway 初始化专用库。检查资料导入失败数为零，索引输出为 `failed=0 stillPending=0`。隔天演示可以重新执行号源脚本，已有预约会保留。需要从零复演时使用新的数据库和 Qdrant 集合。
 
-**终端四启动页面。** 打开浏览器中的 `http://127.0.0.1:5173/guide`，使用[本地演示账号](s1-patient-session-acceptance.md)登录。Vite 代理已指向后端 `8080`。
+**终端四启动页面。** Vite 默认将 `/api` 请求代理到后端 `8080`。在同一个浏览器中打开 [患者端](http://127.0.0.1:5173/appointments) 和 [管理端](http://127.0.0.1:5173/admin)。患者使用[本地演示账号](s1-patient-session-acceptance.md)，管理端使用终端三创建的账号。
 
 ```powershell
 Set-Location web
 pnpm install --frozen-lockfile
 pnpm exec vite --host 127.0.0.1 --strictPort
 ```
+
+如果当前 pnpm 镜像缺少锁文件指定的包，可执行 `pnpm install --frozen-lockfile --registry=https://registry.npmjs.org`。本次干净副本安装使用了该地址。
+
+**重启本地演示环境。** 先用原有数据目录启动 MySQL 和 Qdrant，再以相同数据库名和集合名启动后端及 Vite。已有管理员账号和资料索引可直接使用。保存过模型配置时，需要给后端继续提供同一个 `MEDIFLOW_LLM_SETTINGS_KEY`。如果首次需要测试保存模型配置，先按[模型配置文档](admin-tool-logs.md#ai-模型配置)准备并安全保管此密钥。后端重启后重新登录双端，再核对原预约编号、操作记录和设置。
 
 ## 本地资料维护
 
@@ -160,3 +204,45 @@ pnpm exec vite --host 127.0.0.1 --strictPort
 5. **展示工程细节。** 用抢号或提交回包丢失的截图说明恢复流程。讲清楚抢号时保留原需求并重新确认，提交不确定时用原请求核验。准备一份无患者原话和密钥的任务追踪摘要，展示一次查询/写入/核验的前后关系。
 
 简历可描述为：实现医院预约 Agent，接入 DeepSeek 的只读工具决策和 MySQL/Qdrant 资料检索，支持多轮修改预约条件、候选比较和用户确认。通过请求幂等与原单核验处理抢号和提交结果不确定，在本地浏览器验证真实模型、带来源问答及失败恢复。
+## 岗位、停诊与首次启用验收
+
+进入管理端「系统设置 → 岗位账号」可配置岗位。升级后的已有管理账号获得超级管理员岗位，可用于本地验收。新实例在部署时通过 `MEDIFLOW_ADMIN_USERNAME` 和 `MEDIFLOW_ADMIN_PASSWORD` 创建首个超级管理员，系统管理员可为工作人员分配业务岗位。
+
+| 岗位 | 验收范围 |
+| --- | --- |
+| 超级管理员 | 全部管理页面、数据和操作 |
+| 系统管理员 | 岗位账号、首次启用、科室医生目录、AI 配置和工具注册表 |
+| 排班员 | 授权科室的排班、停诊和安排登记，可按编号核对该科室的预约 |
+| 分诊员 | 授权科室的当日预约和签到 |
+| 知识库管理员 | 院内知识文档、发布和索引 |
+
+1. 给排班员与分诊员分别授权两个演示科室。用排班员预览一个开诊前且无人签到的排班。在患者端为其新增一笔预约，再尝试用旧预览确认。应提示重新核对名单，患者预约保持有效。重新预览并确认后，号源停止对外开放，患者「我的预约」可见停诊原因。登记「建议重新挂号」后，详情可跳转到原科室。用另一个科室的排班和预约编号复查停诊、签到的科室边界。
+2. 在「系统设置 → 首次启用」填写医院名称和门诊咨询电话。默认模板为北京时间、最晚排到今天之后第 90 天、患者查号含当天共 28 天、就诊前一天 23:00 截止线上改约和取消、预约起始前 30 分钟开放签到。可调整规则并在最后一步确认应用。
+3. 按科室、医生、排班的顺序导入 UTF-8 CSV。页面可下载每类模板，每批至多 200 行。预览显示可新增、相同记录跳过、错误或冲突。无错误时再确认导入。科室用科室编码关联，排班用医生管理页显示的医生编码关联；排班日期用 `YYYY-MM-DD`，时段用 `MORNING`、`AFTERNOON` 或 `EVENING`，时间用 `HH:mm`。
+4. 若要验收首次启用前的预约关闭状态，单独新建一个空数据库，开启 Flyway 和 `MEDIFLOW_SETUP_REQUIRED=true`，继续用部署参数建立首个超级管理员。该模式在空库完成初始化后移除内置演示业务数据，重启时继续使用同一个模式。用启用的科室、医生和查号范围内的开放号源通过检查后，普通挂号与智能导诊共用已生效的查号范围。现有本地演示环境按原方式启动。
+
+## 停诊待办与预约通知验收
+
+1. 在 A、B 两科各挂一笔未来预约并办理停诊。只负责 A 科的排班员在工作台「停诊待办」看到 1 笔，超级管理员看到 2 笔。点击待办数，应进入「预约明细」，预约状态为「停诊待安排」。排班员在这份列表只能查到 A 科的预约。
+2. A 科患者从首页「预约通知」打开「门诊停诊」，核对预约编号、停诊原因及「待院方安排」。返回「我的预约」并刷新，该通知保留为已读。
+3. 排班员登记 A 科的安排后，A 科待办数减 1。患者刷新后看到独立的未读「停诊安排更新」，打开后核对安排说明。重新进入「我的预约」并刷新，两条已读状态均保留，B 科患者只收到自己的通知。
+
+通知从已有停诊和安排记录读取。V15 增加按预约及通知类型保存的已读记录。上线时历史停诊也会出现在对应患者的通知中，首次打开时记为已读。
+
+## 双端账号安全验收
+
+1. 在独立演示库给可管理的工作人员建账号，并用两个独立浏览器配置登录。使用系统管理员在「系统设置 → 岗位账号」停用该工作人员。两处会话下一次访问都应失效，原密码在停用期间无法登录。恢复账号后重新登录，核对原岗位和科室。
+2. 在同一账号行选择「重置密码」。记录一次性显示的临时密码，刷新后确认页面已收起明文。临时密码 24 小时内有效，重新重置后旧临时密码立即失效。用最新临时密码登录，核对页面强制进入「设置新密码」，直接访问业务页面也会回到改密页。改好后用新密码登录并打开工作台。
+3. 在该账号行打开「操作记录」，核对停用、恢复、重置和改密的操作者及时间。系统管理员的操作范围为业务岗位账号，超级管理员还可处理系统管理员账号。超级管理员自行改密，最高权限账号的紧急恢复由部署侧处理。
+4. 患者通过顶部「修改密码」输入当前密码和新密码。原密码和旧患者会话应失效，同一浏览器内的管理端会话仍可使用。重新登录后核对原预约编号和通知已读状态。在患者登录页展开「忘记密码」，有已配置联系方式时显示该信息。
+
+V16 增加凭据版本、临时密码有效期和账号操作记录。升级保留已有密码和授权。停用、恢复、重置与改密会推进凭据版本，账号的旧会话从下一次请求起失效。
+
+## 今日分诊和就诊结果复核
+
+1. 在「基础数据管理 → 今日分诊」用分诊员查授权科室的当日预约。用同科室的演示预约核对「待签到 → 已签到 → 已就诊」。签到使用原窗口。收到诊室反馈后可在当天登记，时段结束后仍可补登。用另一科室的预约和次日预约核对权限拦截。
+2. 在患者端「我的预约」查看原预约。签到后可见签到时间，登记就诊后移入历史并显示登记时间与「已就诊」。已签到且截至次日仍未登记时，预约显示「已结束（结果未确认）」。
+3. 超级管理员可在「系统设置 → 岗位账号」向负责人授予指定科室的「就诊复核负责人」岗位。用该账号从「就诊结果复核」打开一笔终态预约，填写原因并追加复核。患者端据复核显示「就诊结果待核实」或「已就诊」。操作记录仍保留原登记、复核人和原因。
+4. 在两个窗口同时提交登记或基于同一旧结果提交复核。第二次提交应收到刷新提示，数据库只留一笔有效操作。核对号源仍占用，运营看板仍统计这笔原预约。
+
+V17 新增就诊登记时间和复核记录。跨日未确认按北京时间从原签到记录计算，既有已签到预约也遵循此规则。

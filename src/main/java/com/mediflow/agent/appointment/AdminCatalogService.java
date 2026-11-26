@@ -1,5 +1,6 @@
 package com.mediflow.agent.appointment;
 
+import com.mediflow.agent.config.AdminAccess.Scope;
 import org.springframework.context.annotation.Profile;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -15,6 +16,7 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
@@ -35,18 +37,21 @@ public class AdminCatalogService {
                       AND s.status = 'AVAILABLE' AND s.start_at > UTC_TIMESTAMP(3)
                       AND sc.status = 'OPEN' AND d.status = 'ACTIVE' AND dp.status = 'ACTIVE') AS remaining,
                    (SELECT COUNT(*) FROM appointment a JOIN appointment_slot s ON s.id = a.slot_id
-                      WHERE s.schedule_id = sc.id AND a.status IN ('BOOKED', 'CHECKED_IN')) AS booked
+                       WHERE s.schedule_id = sc.id AND a.status IN ('BOOKED', 'CHECKED_IN', 'VISITED')) AS booked,
+                   EXISTS(SELECT 1 FROM schedule_interruption i WHERE i.schedule_id=sc.id) AS interrupted
             """;
     private static final RowMapper<Schedule> SCHEDULE = (rs, row) -> new Schedule(rs.getLong("id"),
             rs.getLong("department_id"), rs.getString("department_name"), rs.getLong("doctor_id"),
             rs.getString("doctor_name"), rs.getObject("schedule_date", LocalDate.class), rs.getString("clinic_period"),
-            rs.getString("status"), rs.getInt("slots"), rs.getInt("remaining"), rs.getInt("booked"));
+            rs.getString("status"), rs.getInt("slots"), rs.getInt("remaining"), rs.getInt("booked"), rs.getBoolean("interrupted"));
     private final JdbcTemplate jdbc;
     private final Clock clock;
+    private final HospitalRules rules;
 
-    public AdminCatalogService(JdbcTemplate jdbc, Clock clock) {
+    public AdminCatalogService(JdbcTemplate jdbc, Clock clock, HospitalRules rules) {
         this.jdbc = jdbc;
         this.clock = clock;
+        this.rules = rules;
     }
 
     @Transactional(readOnly = true)
@@ -65,19 +70,24 @@ public class AdminCatalogService {
         checkStatus(status, "ACTIVE", "DISABLED");
         return page("""
                 SELECT d.id, d.department_id, dp.name AS department_name, d.name, d.title,
-                       d.specialty, d.introduction, d.status
+                       d.specialty, d.introduction, d.status, COALESCE(d.code,CONCAT('D-',d.id)) AS import_code
                 """, """
                 FROM doctor d JOIN department dp ON dp.id = d.department_id
                 WHERE (? IS NULL OR d.name LIKE CONCAT('%', ?, '%'))
                   AND (? IS NULL OR d.department_id = ?) AND (? IS NULL OR d.status = ?)
                 """, "ORDER BY dp.name, d.name, d.id", (rs, row) -> new Doctor(rs.getLong("id"), rs.getLong("department_id"),
                 rs.getString("department_name"), rs.getString("name"), rs.getString("title"), rs.getString("specialty"),
-                rs.getString("introduction"), rs.getString("status")), page, q, q, departmentId, departmentId, status, status);
+                rs.getString("introduction"), rs.getString("status"), rs.getString("import_code")), page, q, q, departmentId, departmentId, status, status);
     }
 
     public List<CatalogOption> departmentOptions() {
-        return jdbc.query("SELECT id, name, status FROM department ORDER BY name, id",
-                (rs, row) -> new CatalogOption(rs.getLong("id"), rs.getString("name"), rs.getString("status")));
+        return departmentOptions(new Scope(true, java.util.Set.of()));
+    }
+
+    public List<CatalogOption> departmentOptions(Scope scope) {
+        var args = new ArrayList<>();
+        return jdbc.query("SELECT id, name, status FROM department WHERE " + scope.predicate("id", args) + " ORDER BY name, id",
+                (rs, row) -> new CatalogOption(rs.getLong("id"), rs.getString("name"), rs.getString("status")), args.toArray());
     }
 
     public List<CatalogOption> doctorOptions(long departmentId) {
@@ -88,14 +98,21 @@ public class AdminCatalogService {
     @Transactional(readOnly = true)
     public Page<Schedule> schedules(Long departmentId, Long doctorId, LocalDate date, LocalDate from, LocalDate to,
                                     String status, int page) {
+        return schedules(departmentId, doctorId, date, from, to, status, page, new Scope(true, java.util.Set.of()));
+    }
+
+    @Transactional(readOnly = true)
+    public Page<Schedule> schedules(Long departmentId, Long doctorId, LocalDate date, LocalDate from, LocalDate to,
+                                    String status, int page, Scope scope) {
         checkStatus(status, "OPEN", "CLOSED");
         if (from != null && to != null && to.isBefore(from)) throw new IllegalArgumentException("结束日期不能早于开始日期。");
+        var args = new ArrayList<Object>(Arrays.asList(departmentId, departmentId, doctorId, doctorId, date, date, from, from, to, to, status, status));
         return page(SCHEDULE_COLUMNS, SCHEDULE_SOURCE + """
                 WHERE (? IS NULL OR dp.id = ?) AND (? IS NULL OR d.id = ?)
                   AND (? IS NULL OR sc.schedule_date = ?) AND (? IS NULL OR sc.schedule_date >= ?)
                   AND (? IS NULL OR sc.schedule_date <= ?) AND (? IS NULL OR sc.status = ?)
-                """, "ORDER BY sc.schedule_date DESC, sc.id DESC", SCHEDULE, page,
-                departmentId, departmentId, doctorId, doctorId, date, date, from, from, to, to, status, status);
+                """ + " AND " + scope.predicate("dp.id", args), " ORDER BY sc.schedule_date DESC, sc.id DESC", SCHEDULE, page,
+                args.toArray());
     }
 
     @Transactional(readOnly = true)
@@ -107,6 +124,11 @@ public class AdminCatalogService {
                 """, (rs, row) -> new Slot(rs.getInt("slot_no"), rs.getTimestamp("start_at").toInstant(),
                 rs.getTimestamp("end_at").toInstant(), rs.getString("status")), id);
         return new ScheduleDetail(schedule, slots);
+    }
+
+    public long departmentForSchedule(long id) {
+        return jdbc.queryForList("SELECT d.department_id FROM doctor_schedule s JOIN doctor d ON d.id=s.doctor_id WHERE s.id=?",
+                Long.class, id).stream().findFirst().orElseThrow(() -> notFound("排班"));
     }
 
     @Transactional
@@ -136,13 +158,18 @@ public class AdminCatalogService {
 
     @Transactional
     public void createDoctor(long departmentId, String name, String title, String specialty, String introduction) {
+        createDoctor(departmentId, null, name, title, specialty, introduction);
+    }
+
+    @Transactional
+    public void createDoctor(long departmentId, String code, String name, String title, String specialty, String introduction) {
         if (!"ACTIVE".equals(AppointmentAvailability.lockDepartment(jdbc, departmentId))) {
             throw conflict("请为医生选择已启用的科室。");
         }
         jdbc.update("""
-                INSERT INTO doctor (department_id, name, title, specialty, introduction, status)
-                VALUES (?, ?, ?, ?, ?, 'ACTIVE')
-                """, departmentId, name.strip(), clean(title), clean(specialty), clean(introduction));
+                INSERT INTO doctor (department_id, code, name, title, specialty, introduction, status)
+                VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
+                """, departmentId, code, name.strip(), clean(title), clean(specialty), clean(introduction));
     }
 
     @Transactional
@@ -216,7 +243,7 @@ public class AdminCatalogService {
         if ("CLOSED".equals(current)) return;
         var occupied = jdbc.queryForList("""
                 SELECT a.id FROM appointment a JOIN appointment_slot s ON s.id = a.slot_id
-                WHERE s.schedule_id = ? AND a.status IN ('BOOKED', 'CHECKED_IN') FOR UPDATE
+                WHERE s.schedule_id = ? AND a.status IN ('BOOKED', 'CHECKED_IN', 'VISITED') FOR UPDATE
                 """, Long.class, id);
         if (!occupied.isEmpty()) throw conflict("已有 " + occupied.size() + " 笔有效预约，无法关闭此排班。");
         if (!jdbc.queryForList("""
@@ -245,16 +272,17 @@ public class AdminCatalogService {
     private void protectFutureBookings(String label, String field, long id) {
         var booked = jdbc.queryForList("""
                 SELECT a.id FROM appointment a JOIN appointment_slot s ON s.id = a.slot_id
-                WHERE a.status IN ('BOOKED', 'CHECKED_IN') AND s.end_at > UTC_TIMESTAMP(3) AND %s = ? FOR UPDATE
+                WHERE a.status IN ('BOOKED', 'CHECKED_IN', 'VISITED') AND s.end_at > UTC_TIMESTAMP(3) AND %s = ? FOR UPDATE
                 """.formatted(field), Long.class, id);
         if (!booked.isEmpty()) throw conflict(label + "还有 " + booked.size() + " 笔有效预约，无法停用。");
     }
 
-    private void validateWindow(LocalDateTime first, LocalDateTime end, Period period) {
+    void validateWindow(LocalDateTime first, LocalDateTime end, Period period) {
         LocalDate today = LocalDate.now(clock.withZone(HOSPITAL));
+        int horizon = rules.active().scheduleDays();
         if (!first.atZone(HOSPITAL).toInstant().isAfter(clock.instant())
-                || first.toLocalDate().isAfter(today.plusDays(SlotQueryService.SCHEDULE_HORIZON_DAYS))) {
-            throw new IllegalArgumentException("号源须在当前时间之后，并在未来 90 天排班范围内。");
+                || first.toLocalDate().isAfter(today.plusDays(horizon))) {
+            throw new IllegalArgumentException("号源须在当前时间之后，最晚可排到今天之后第 " + horizon + " 天。");
         }
         if (first.toLocalTime().isBefore(period.start) || end.isAfter(first.toLocalDate().atTime(period.end))
                 || first.getSecond() != 0 || first.getNano() != 0) {
@@ -312,9 +340,10 @@ public class AdminCatalogService {
     public record CatalogOption(long id, String name, String status) {}
     public record Department(long id, String code, String name, String description, String status) {}
     public record Doctor(long id, long departmentId, String departmentName, String name,
-                         String title, String specialty, String introduction, String status) {}
+                         String title, String specialty, String introduction, String status, String importCode) {}
     public record Schedule(long id, long departmentId, String departmentName, long doctorId, String doctorName,
-                           LocalDate scheduleDate, String clinicPeriod, String status, int slots, int remaining, int booked) {}
+                           LocalDate scheduleDate, String clinicPeriod, String status, int slots, int remaining, int booked,
+                           boolean interrupted) {}
     public record Slot(int number, Instant startAt, Instant endAt, String status) {}
     public record ScheduleDetail(Schedule schedule, List<Slot> slots) {}
 }

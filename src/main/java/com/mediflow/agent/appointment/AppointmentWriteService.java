@@ -104,6 +104,8 @@ public final class AppointmentWriteService {
                 case "CANCELLED" -> new BookingResult(Outcome.REJECTED, appointmentNo, "APPOINTMENT_CANCELLED", "原预约已取消。");
                 case "RESCHEDULED" -> new BookingResult(Outcome.REJECTED, appointmentNo, "APPOINTMENT_RESCHEDULED",
                         "原预约已改约，可从原预约详情查看新预约。");
+                case "INTERRUPTED" -> new BookingResult(Outcome.REJECTED, appointmentNo, "APPOINTMENT_INTERRUPTED",
+                        "原排班已停诊，请查看预约详情中的院方安排。");
                 default -> existing(appointmentNo);
             };
         }
@@ -131,6 +133,7 @@ public final class AppointmentWriteService {
 
     private final JdbcTemplate jdbc;
     private final Clock clock;
+    private final HospitalRules rules;
     private final TransactionTemplate transactions;
     /**
      * Used only when the booking transaction is already rolling back, so the failure record cannot
@@ -139,7 +142,13 @@ public final class AppointmentWriteService {
     private final TransactionTemplate failureAuditTransactions;
 
     public AppointmentWriteService(DataSource dataSource, PlatformTransactionManager transactionManager, Clock clock) {
+        this(dataSource, transactionManager, clock, new HospitalRules(new JdbcTemplate(dataSource)));
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public AppointmentWriteService(DataSource dataSource, PlatformTransactionManager transactionManager, Clock clock, HospitalRules rules) {
         this.clock = clock;
+        this.rules = rules;
         this.jdbc = new JdbcTemplate(dataSource);
         this.transactions = new TransactionTemplate(transactionManager);
         this.failureAuditTransactions = new TransactionTemplate(transactionManager);
@@ -193,8 +202,10 @@ public final class AppointmentWriteService {
             if (!"BOOKED".equals(status) || !clinicOpen || !"RESERVED".equals(slot.status())) {
                 return LifecycleResult.refused("CHECK_IN_UNAVAILABLE", "当前预约无法签到，请核对预约和排班状态。");
             }
-            if (now.isBefore(AppointmentTiming.checkInOpensAt(slot.start())) || !now.isBefore(slot.end())) {
-                return LifecycleResult.refused("CHECK_IN_OUTSIDE_WINDOW", "签到时间为预约开始前 30 分钟至预约时段结束前。");
+            var rule = rules.active();
+            if (now.isBefore(rule.checkInFrom(slot.start())) || !now.isBefore(slot.end())) {
+                return LifecycleResult.refused("CHECK_IN_OUTSIDE_WINDOW", "签到时间为预约开始前 " +
+                        rule.checkInLead() + " 分钟至预约时段结束前。");
             }
             jdbc.update("UPDATE appointment SET status = 'CHECKED_IN', checked_in_at = ? WHERE id = ?",
                     Timestamp.from(now), target.id());
@@ -203,7 +214,7 @@ public final class AppointmentWriteService {
             if (!"BOOKED".equals(status)) {
                 return LifecycleResult.refused("CANCEL_UNAVAILABLE", "当前预约无法线上取消，请联系分诊台。");
             }
-            if (!now.isBefore(AppointmentTiming.cancellationDeadline(slot.date()))) {
+            if (!now.isBefore(rules.active().cancelBefore(slot.date()))) {
                 return LifecycleResult.refused("CANCEL_CUTOFF_PASSED", "已过线上取消时间，请联系分诊台。");
             }
             jdbc.update("UPDATE appointment SET status = 'CANCELLED', cancelled_at = ? WHERE id = ?",
@@ -241,7 +252,7 @@ public final class AppointmentWriteService {
 
     private void releaseVacantSlot(long slotId, VisitSlot slot, boolean clinicOpen, Instant now) {
         if ("RESERVED".equals(slot.status()) && jdbc.queryForList("""
-                SELECT id FROM appointment WHERE slot_id = ? AND status IN ('BOOKED', 'CHECKED_IN') FOR UPDATE
+                SELECT id FROM appointment WHERE slot_id = ? AND status IN ('BOOKED', 'CHECKED_IN', 'VISITED') FOR UPDATE
                 """, Long.class, slotId).isEmpty()) {
             jdbc.update("UPDATE appointment_slot SET status = ?, version = version + 1 WHERE id = ?",
                     clinicOpen && now.isBefore(slot.start()) ? "AVAILABLE" : "CLOSED", slotId);
@@ -298,14 +309,14 @@ public final class AppointmentWriteService {
         if (!"BOOKED".equals(status) || !"RESERVED".equals(oldSlot.status()) || !now.isBefore(oldSlot.end())) {
             return rejectReschedule(command, original.id(), "ORIGINAL_UNAVAILABLE");
         }
-        if (!now.isBefore(AppointmentTiming.cancellationDeadline(oldSlot.date()))) {
+        if (!now.isBefore(rules.active().cancelBefore(oldSlot.date()))) {
             return rejectReschedule(command, original.id(), "RESCHEDULE_CUTOFF_PASSED");
         }
         if (command.slotId() == original.slotId()) return rejectReschedule(command, original.id(), "SAME_SLOT");
         if (newPath != null && !sameDoctor) return rejectReschedule(command, original.id(), "DIFFERENT_DOCTOR");
         var today = SlotQueryService.hospitalDate(now);
         if (newSlot == null || !"ACTIVE".equals(department) || !"ACTIVE".equals(doctor)
-                || newSlot.date().isBefore(today) || newSlot.date().isAfter(SlotQueryService.patientWindowEnd(today))
+                || newSlot.date().isBefore(today) || newSlot.date().isAfter(rules.active().patientEnd(today))
                 || !now.isBefore(newSlot.start())) {
             return rejectReschedule(command, original.id(), "SLOT_NOT_FOUND");
         }
@@ -379,7 +390,10 @@ public final class AppointmentWriteService {
         if ("RESCHEDULED".equals(status)) {
             return new VerificationResult(false, "原预约已改约，可从原预约详情查看新预约。", "APPOINTMENT_RESCHEDULED");
         }
-        return "BOOKED".equals(status) || "CHECKED_IN".equals(status)
+        if ("INTERRUPTED".equals(status)) {
+            return new VerificationResult(false, "原排班已停诊，请查看预约详情中的院方安排。", "APPOINTMENT_INTERRUPTED");
+        }
+        return "BOOKED".equals(status) || "CHECKED_IN".equals(status) || "VISITED".equals(status)
                 ? new VerificationResult(true, "预约核验成功", null)
                 : new VerificationResult(false, "当前预约状态无法核验", null);
     }
@@ -638,6 +652,7 @@ public final class AppointmentWriteService {
         if (slotId == null) {
             return null;
         }
+        if (!rules.bookingEnabled()) return null;
         var path = findSlotPath(slotId);
         if (path == null
                 || !"ACTIVE".equals(AppointmentAvailability.lockDepartment(jdbc, path.departmentId()))
@@ -649,9 +664,11 @@ public final class AppointmentWriteService {
                 SELECT id, status
                 FROM appointment_slot
                 WHERE id = ? AND schedule_id = ? AND start_at > UTC_TIMESTAMP(3)
+                  AND EXISTS (SELECT 1 FROM doctor_schedule ds WHERE ds.id=appointment_slot.schedule_id AND ds.schedule_date<=?)
                 FOR UPDATE
                 """, (result, rowNum) -> new SlotRow(
-                result.getLong("id"), result.getString("status"), path.doctorId(), path.departmentId()), slotId, path.scheduleId())
+                result.getLong("id"), result.getString("status"), path.doctorId(), path.departmentId()), slotId, path.scheduleId(),
+                rules.active().patientEnd(SlotQueryService.hospitalDate(clock.instant())))
                 .stream().findFirst().orElse(null);
     }
 

@@ -37,6 +37,7 @@ import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.Map;
 import java.util.Base64;
@@ -49,6 +50,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @SpringBootTest(properties = {
@@ -1411,16 +1413,18 @@ class MySqlAdminKnowledgeTest {
                 java.time.Clock.fixed(end.minusMillis(1), java.time.ZoneOffset.UTC));
         var readAtEnd = new AppointmentQueryService(jdbc.getDataSource(),
                 java.time.Clock.fixed(end, java.time.ZoneOffset.UTC));
+        var all = new com.mediflow.agent.config.AdminAccess.Scope(true, java.util.Set.of());
+        var scope = new AppointmentQueryService.RegisterAccess(all, all, all, date);
         var expiredFilter = new AppointmentQueryService.AdminFilters(number, null, null, null, null,
-                null, null, AppointmentQueryService.Status.EXPIRED);
+                null, null, AppointmentQueryService.Status.EXPIRED, false, null);
         var bookedFilter = new AppointmentQueryService.AdminFilters(number, null, null, null, null,
-                null, null, AppointmentQueryService.Status.BOOKED);
-        assertThat(readBeforeEnd.adminAppointments(expiredFilter, 1).totalCount()).isZero();
-        var before = readBeforeEnd.adminAppointments(bookedFilter, 1).items().get(0).appointment();
+                null, null, AppointmentQueryService.Status.BOOKED, false, null);
+        assertThat(readBeforeEnd.adminAppointments(expiredFilter, 1, scope).totalCount()).isZero();
+        var before = readBeforeEnd.adminAppointments(bookedFilter, 1, scope).items().get(0).appointment();
         assertThat(before.status()).isEqualTo("BOOKED");
         assertThat(before.canCheckIn()).isTrue();
-        assertThat(readAtEnd.adminAppointments(bookedFilter, 1).totalCount()).isZero();
-        var atEnd = readAtEnd.adminAppointments(expiredFilter, 1).items().get(0).appointment();
+        assertThat(readAtEnd.adminAppointments(bookedFilter, 1, scope).totalCount()).isZero();
+        var atEnd = readAtEnd.adminAppointments(expiredFilter, 1, scope).items().get(0).appointment();
         assertThat(atEnd.status()).isEqualTo("EXPIRED");
         assertThat(atEnd.canCheckIn()).isFalse();
         assertThat(atEnd.canCancel()).isFalse();
@@ -1430,7 +1434,7 @@ class MySqlAdminKnowledgeTest {
         catalogPost(checkIn, patient, csrf(ADMIN_AUTH, patient), null).andExpect(status().isUnauthorized());
         catalogPost(checkIn, admin, adminToken, null).andExpect(status().isOk());
         catalogPost(checkIn, admin, adminToken, null).andExpect(status().isOk());
-        assertThat(readAtEnd.adminAppointments(expiredFilter, 1).totalCount()).isZero();
+        assertThat(readAtEnd.adminAppointments(expiredFilter, 1, scope).totalCount()).isZero();
         assertThat(readAtEnd.findForPatient(number, 1001L).orElseThrow().status()).isEqualTo("CHECKED_IN");
         catalogPost("/api/v1/appointments/" + number + "/cancel", patient, token, null)
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.code").value("CANCEL_UNAVAILABLE"));
@@ -1449,6 +1453,376 @@ class MySqlAdminKnowledgeTest {
                 SELECT COUNT(*) FROM operation_audit_log l JOIN appointment a ON l.target_id = a.id
                 WHERE a.appointment_no = ? AND l.operation_type = 'APPOINTMENT_CHECK_IN'
                 """, Long.class, number)).isEqualTo(1);
+    }
+
+    @Test
+    void staffScopesSeparateStoppingFromCheckInAndStopRevalidatesTheAppointments() throws Exception {
+        var admin = signIn(ADMIN_AUTH, ADMIN, ADMIN_PASSWORD, new MockHttpSession(), 204);
+        var token = csrf(ADMIN_AUTH, admin);
+        var patient = signIn(PATIENT_AUTH, "demo-patient", "Mediflow-Demo-A!2026", new MockHttpSession(), 204);
+        var patientToken = csrf(PATIENT_AUTH, patient);
+        long scheduled = newClinic("SCOPE-STOP");
+        long triaged = newClinic("SCOPE-TRIAGE");
+        long scheduledDoctor = jdbc.queryForObject("SELECT id FROM doctor WHERE department_id=?", Long.class, scheduled);
+        long triagedDoctor = jdbc.queryForObject("SELECT id FROM doctor WHERE department_id=?", Long.class, triaged);
+        String password = "Synthetic-Scope!2026";
+        catalogPost("/api/v1/admin/staff", admin, token, Map.of(
+                "username", "scope-staff", "displayName", "演示岗位", "password", password, "grants", java.util.List.of(
+                        Map.of("role", "SCHEDULER", "departmentId", scheduled),
+                        Map.of("role", "TRIAGE", "departmentId", triaged)))).andExpect(status().isCreated());
+        var staff = signIn(ADMIN_AUTH, "scope-staff", password, new MockHttpSession(), 204);
+        var staffToken = csrf(ADMIN_AUTH, staff);
+        mvc.perform(get(ADMIN_AUTH + "/session").session(admin))
+                .andExpect(jsonPath("$.grants[0].role").value("SUPER_ADMIN"));
+        mvc.perform(get("/api/v1/admin/agent/model-config").session(staff)).andExpect(status().isForbidden());
+        var date = LocalDate.now(ZoneId.of("Asia/Shanghai")).plusDays(2);
+        adminCatalog.createSchedule(scheduled, scheduledDoctor, date, AdminCatalogService.Period.MORNING, LocalTime.of(9,0), 15, 2);
+        adminCatalog.createSchedule(triaged, triagedDoctor, date, AdminCatalogService.Period.MORNING, LocalTime.of(9,0), 15, 1);
+        long schedule = scheduleFor(scheduledDoctor, date);
+        long other = scheduleFor(triagedDoctor, date);
+        String stop = "/api/v1/admin/catalog/schedules/" + schedule + "/interruption";
+        String denied = "/api/v1/admin/catalog/schedules/" + other + "/interruption";
+        mvc.perform(get(denied + "/preview").session(staff)).andExpect(status().isForbidden());
+        String before = json.readTree(mvc.perform(get(stop + "/preview").session(staff)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.appointments").isEmpty()).andReturn().getResponse().getContentAsByteArray()).get("token").asText();
+        String appointment = json.readTree(catalogPost("/api/v1/appointments", patient, patientToken,
+                Map.of("slotId", firstSlot(schedule), "idempotencyKey", "scope-interrupt")).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsByteArray()).get("appointmentNo").asText();
+        String otherAppointment = json.readTree(catalogPost("/api/v1/appointments", patient, patientToken,
+                Map.of("slotId", firstSlot(other), "idempotencyKey", "scope-other")).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsByteArray()).get("appointmentNo").asText();
+        mvc.perform(get("/api/v1/admin/appointments").session(staff).param("appointmentNo", otherAppointment))
+                .andExpect(jsonPath("$.totalCount").value(0));
+        catalogPost("/api/v1/admin/appointments/" + appointment + "/check-in", staff, staffToken, null)
+                .andExpect(status().isForbidden());
+        var deniedInput = Map.of("requestId", java.util.UUID.randomUUID(), "token", before, "reason", "演示停诊");
+        catalogPost(denied, staff, staffToken, deniedInput).andExpect(status().isForbidden());
+        catalogPost(stop, staff, staffToken, deniedInput).andExpect(status().isConflict());
+        mvc.perform(get("/api/v1/appointments/" + appointment).session(patient)).andExpect(jsonPath("$.status").value("BOOKED"));
+        String latest = json.readTree(mvc.perform(get(stop + "/preview").session(staff))
+                .andExpect(jsonPath("$.appointments[0].appointmentNo").value(appointment))
+                .andReturn().getResponse().getContentAsByteArray()).get("token").asText();
+        var input = Map.of("requestId", java.util.UUID.randomUUID(), "token", latest, "reason", "演示停诊");
+        var stopped = catalogPost(stop, staff, staffToken, input).andExpect(status().isOk())
+                .andExpect(jsonPath("$.affected").value(1)).andReturn().getResponse().getContentAsString();
+        catalogPost(stop, staff, staffToken, input).andExpect(content().json(stopped));
+        mvc.perform(get("/api/v1/appointments/" + appointment).session(patient))
+                .andExpect(jsonPath("$.status").value("INTERRUPTED")).andExpect(jsonPath("$.interruption.reason").value("演示停诊"));
+        catalogPut("/api/v1/admin/appointments/" + appointment + "/arrangement", staff, staffToken,
+                Map.of("outcome", "REBOOK", "note", "请按原科室重新挂号。")).andExpect(status().isNoContent());
+        mvc.perform(get("/api/v1/appointments/" + appointment).session(patient))
+                .andExpect(jsonPath("$.interruption.outcome").value("REBOOK"));
+
+        var start = java.time.Instant.now().plusSeconds(180);
+        var today = LocalDate.ofInstant(start, ZoneId.of("Asia/Shanghai"));
+        jdbc.update("INSERT INTO doctor_schedule(doctor_id,schedule_date,clinic_period,status) VALUES (?,?,'MORNING','OPEN')", triagedDoctor, today);
+        long sameDay = scheduleFor(triagedDoctor, today);
+        jdbc.update("INSERT INTO appointment_slot(schedule_id,slot_no,start_at,end_at,status) VALUES (?,1,?,?,'AVAILABLE')",
+                sameDay, java.sql.Timestamp.from(start), java.sql.Timestamp.from(start.plusSeconds(900)));
+        String checkInNumber = json.readTree(catalogPost("/api/v1/appointments", patient, patientToken,
+                Map.of("slotId", firstSlot(sameDay), "idempotencyKey", "scope-arrival")).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsByteArray()).get("appointmentNo").asText();
+        mvc.perform(get("/api/v1/admin/appointments").session(staff).param("appointmentNo", checkInNumber))
+                .andExpect(jsonPath("$.items[0].patientName").isString())
+                .andExpect(jsonPath("$.items[0].checkInAllowed").value(true));
+        catalogPost("/api/v1/admin/appointments/" + checkInNumber + "/check-in", staff, staffToken, null)
+                .andExpect(status().isOk());
+        mvc.perform(get("/api/v1/admin/catalog/schedules/" + sameDay + "/interruption/preview").session(admin))
+                .andExpect(status().isConflict());
+    }
+
+    @Test
+    void hospitalSetupPreviewsThenImportsAndAppliesRulesToBothBookingPaths() throws Exception {
+        var admin = signIn(ADMIN_AUTH, ADMIN, ADMIN_PASSWORD, new MockHttpSession(), 204);
+        var token = csrf(ADMIN_AUTH, admin);
+        String base = "/api/v1/admin/setup";
+        mvc.perform(get(base).session(admin)).andExpect(status().isOk()).andExpect(jsonPath("$.defaults.patientDays").value(28));
+        String date = LocalDate.now(ZoneId.of("Asia/Shanghai")).plusDays(2).toString();
+        var samples = java.util.List.of(
+                Map.of("kind","DEPARTMENTS", "csv", "code,name\nSETUP-CLINIC,演示科室"),
+                Map.of("kind","DOCTORS", "csv", "code,name,departmentCode,title\nSETUP-DOC,演示医生,SETUP-CLINIC,\"副主任, 医师\""),
+                Map.of("kind","SCHEDULES", "csv", "doctorCode,date,period,start,minutes,count\nSETUP-DOC," + date + ",MORNING,09:00,15,2"));
+        for (var sample : samples) {
+            String preview = json.readTree(catalogPost(base + "/import/preview", admin, token, sample)
+                    .andExpect(jsonPath("$.rows[0].state").value("CREATE")).andReturn().getResponse().getContentAsByteArray()).get("token").asText();
+            catalogPost(base + "/import/commit", admin, token, Map.of("kind", sample.get("kind"), "csv", sample.get("csv"), "token", "wrong"))
+                    .andExpect(status().isConflict());
+            catalogPost(base + "/import/commit", admin, token, Map.of("kind", sample.get("kind"), "csv", sample.get("csv"), "token", preview))
+                    .andExpect(status().isOk()).andExpect(content().string("1"));
+            catalogPost(base + "/import/preview", admin, token, sample).andExpect(jsonPath("$.rows[0].state").value("SKIP"));
+        }
+        try {
+            catalogPut(base + "/activate", admin, token, Map.of("name","演示医院", "contact","0000-000000",
+                            "scheduleDays",35,"patientDays",10,"cancellationCutoff","21:00","checkInLead",15))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.profile.name").value("演示医院"));
+            var end = LocalDate.now(ZoneId.of("Asia/Shanghai")).plusDays(9);
+            mvc.perform(get("/api/v1/slots/window")).andExpect(jsonPath("$.searchEndDate").value(end.toString()));
+            var query = beanFactory.getBean(com.mediflow.agent.appointment.SlotQueryService.class);
+            assertThat(query.searchStrict(new com.mediflow.agent.appointment.SlotCriteria(
+                    null, "SETUP-CLINIC", null, null, null, null, 20)).searchEndDate()).isEqualTo(end);
+            mvc.perform(get(base).session(admin)).andExpect(jsonPath("$.rules.cancellationCutoff").value("21:00:00"));
+        } finally {
+            jdbc.update("UPDATE hospital_settings SET hospital_name='',contact='',schedule_days=90,patient_days=28," +
+                    "cancellation_cutoff='23:00:00',check_in_lead=30,activated_at=NULL,activated_by=NULL WHERE id=1");
+        }
+    }
+
+    @Test
+    void pendingStopsAndPatientNotificationsTrackTheSameAppointments() throws Exception {
+        var admin = signIn(ADMIN_AUTH, ADMIN, ADMIN_PASSWORD, new MockHttpSession(), 204);
+        var adminToken = csrf(ADMIN_AUTH, admin);
+        var patient = signIn(PATIENT_AUTH, "demo-patient", "Mediflow-Demo-A!2026", new MockHttpSession(), 204);
+        var stranger = signIn(PATIENT_AUTH, "demo-patient-b", "Mediflow-Demo-B!2026", new MockHttpSession(), 204);
+        var patientToken = csrf(PATIENT_AUTH, patient);
+        String list = "/api/v1/admin/appointments", count = list + "/interruption-pending/count";
+        String inbox = "/api/v1/appointment-notifications";
+        long clinicA = newClinic("NOTICES-A"), clinicB = newClinic("NOTICES-B");
+        String password = "Notice-Fixture!2026";
+        catalogPost("/api/v1/admin/staff", admin, adminToken, Map.of(
+                "username", "demo-notice-scheduler", "displayName", "通知演示排班员", "password", password, "grants",
+                java.util.List.of(Map.of("role", "SCHEDULER", "departmentId", clinicA))))
+                .andExpect(status().isCreated());
+        var scheduler = signIn(ADMIN_AUTH, "demo-notice-scheduler", password, new MockHttpSession(), 204);
+        var schedulerToken = csrf(ADMIN_AUTH, scheduler);
+        int beforeCount = json.readTree(mvc.perform(get(count).session(admin)).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsByteArray()).get("count").asInt();
+        int beforeUnread = json.readTree(mvc.perform(get(inbox).session(patient)).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsByteArray()).get("unreadCount").asInt();
+        mvc.perform(get(inbox)).andExpect(status().isUnauthorized());
+
+        String own = bookAndStopForNotices(clinicA, patient, admin, adminToken, "notice-a");
+        String other = bookAndStopForNotices(clinicB, stranger, admin, adminToken, "notice-b");
+        mvc.perform(get(count).session(admin)).andExpect(jsonPath("$.count").value(beforeCount + 2));
+        mvc.perform(get(count).session(scheduler)).andExpect(jsonPath("$.count").value(1));
+        mvc.perform(get(list).session(scheduler).param("pendingArrangement", "true"))
+                .andExpect(jsonPath("$.totalCount").value(1))
+                .andExpect(jsonPath("$.items[0].appointment.appointmentNo").value(own));
+        mvc.perform(get(list).session(scheduler).param("pendingArrangement", "true").param("appointmentNo", other))
+                .andExpect(jsonPath("$.totalCount").value(0));
+        mvc.perform(get(inbox).session(patient)).andExpect(jsonPath("$.unreadCount").value(beforeUnread + 1))
+                .andExpect(jsonPath("$.items[0].appointmentNo").value(own))
+                .andExpect(jsonPath("$.items[0].kind").value("STOPPED"));
+        String receipt = inbox + "/" + own + "/read";
+        catalogPost(receipt, stranger, csrf(PATIENT_AUTH, stranger), Map.of("kind", "STOPPED"))
+                .andExpect(status().isNotFound());
+        catalogPost(receipt, patient, patientToken, Map.of("kind", "ARRANGEMENT")).andExpect(status().isNotFound());
+        for (int repeat = 0; repeat < 2; repeat++) {
+            catalogPost(receipt, patient, patientToken, Map.of("kind", "STOPPED")).andExpect(status().isNoContent());
+        }
+        mvc.perform(get(inbox).session(patient)).andExpect(jsonPath("$.unreadCount").value(beforeUnread));
+        catalogPut(list + "/" + own + "/arrangement", scheduler, schedulerToken,
+                Map.of("outcome", "REBOOK", "note", "请重新挂号。")).andExpect(status().isNoContent());
+        mvc.perform(get(count).session(scheduler)).andExpect(jsonPath("$.count").value(0));
+        mvc.perform(get(count).session(admin)).andExpect(jsonPath("$.count").value(beforeCount + 1));
+        mvc.perform(get(list).session(scheduler).param("pendingArrangement", "true")).andExpect(jsonPath("$.totalCount").value(0));
+        var reloaded = signIn(PATIENT_AUTH, "demo-patient", "Mediflow-Demo-A!2026", new MockHttpSession(), 204);
+        mvc.perform(get(inbox).session(reloaded)).andExpect(jsonPath("$.unreadCount").value(beforeUnread + 1))
+                .andExpect(jsonPath("$.items[0].appointmentNo").value(own))
+                .andExpect(jsonPath("$.items[0].kind").value("ARRANGEMENT"));
+        catalogPost(receipt, reloaded, csrf(PATIENT_AUTH, reloaded), Map.of("kind", "ARRANGEMENT"))
+                .andExpect(status().isNoContent());
+        mvc.perform(get(inbox).session(reloaded)).andExpect(jsonPath("$.unreadCount").value(beforeUnread));
+        mvc.perform(get(inbox).session(stranger)).andExpect(jsonPath("$.items[0].appointmentNo").value(other));
+    }
+
+    private String bookAndStopForNotices(long department, MockHttpSession patient, MockHttpSession admin,
+                                         Csrf adminToken, String key) throws Exception {
+        var date = LocalDate.now(ZoneId.of("Asia/Shanghai")).plusDays(2);
+        long doctor = jdbc.queryForObject("SELECT id FROM doctor WHERE department_id=?", Long.class, department);
+        adminCatalog.createSchedule(department, doctor, date, AdminCatalogService.Period.MORNING, LocalTime.of(9, 0), 15, 1);
+        long schedule = scheduleFor(doctor, date);
+        String appointment = json.readTree(catalogPost("/api/v1/appointments", patient, csrf(PATIENT_AUTH, patient),
+                Map.of("slotId", firstSlot(schedule), "idempotencyKey", key)).andExpect(jsonPath("$.success").value(true))
+                .andReturn().getResponse().getContentAsByteArray()).get("appointmentNo").asText();
+        String stop = "/api/v1/admin/catalog/schedules/" + schedule + "/interruption";
+        String preview = json.readTree(mvc.perform(get(stop + "/preview").session(admin)).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsByteArray()).get("token").asText();
+        catalogPost(stop, admin, adminToken, Map.of("requestId", java.util.UUID.randomUUID(), "token", preview, "reason", "通知验收停诊"))
+                .andExpect(status().isOk());
+        return appointment;
+    }
+
+    @Test
+    void staffLifecycleRevokesSessionsAndRequiresChangingTheLatestTemporaryPassword() throws Exception {
+        var admin = signIn(ADMIN_AUTH, ADMIN, ADMIN_PASSWORD, new MockHttpSession(), 204);
+        var token = csrf(ADMIN_AUTH, admin);
+        long department = newClinic("STAFF-SECURITY");
+        String user = "security-staff", original = "Synthetic-Staff-Initial!2026";
+        String staff = "/api/v1/admin/staff";
+        catalogPost(staff, admin, token, Map.of("username", user, "displayName", "账号安全验收员", "password", original,
+                "grants", java.util.List.of(Map.of("role", "TRIAGE", "departmentId", department))))
+                .andExpect(status().isCreated());
+        long id = jdbc.queryForObject("SELECT id FROM sys_user WHERE username=?", Long.class, user);
+        long owner = jdbc.queryForObject("SELECT id FROM sys_user WHERE username=?", Long.class, ADMIN);
+        String target = staff + "/" + id;
+        catalogPut(staff + "/" + owner + "/status", admin, token, Map.of("active", false)).andExpect(status().isForbidden());
+        catalogPost(staff + "/" + owner + "/password-reset", admin, token, null).andExpect(status().isForbidden());
+        var tabOne = signIn(ADMIN_AUTH, user, original, new MockHttpSession(), 204);
+        var tabTwo = signIn(ADMIN_AUTH, user, original, new MockHttpSession(), 204);
+        catalogPut(target + "/status", admin, token, Map.of("active", false)).andExpect(status().isNoContent());
+        catalogPost(target + "/password-reset", admin, token, null).andExpect(status().isConflict());
+        mvc.perform(get(ADMIN_AUTH + "/session").session(tabOne)).andExpect(status().isUnauthorized());
+        mvc.perform(get("/api/v1/admin/appointments").session(tabTwo)).andExpect(status().isUnauthorized());
+        signIn(ADMIN_AUTH, user, original, new MockHttpSession(), 401);
+        mvc.perform(get(staff).session(admin)).andExpect(jsonPath("$[?(@.username=='" + user + "')].status").value("DISABLED"))
+                .andExpect(jsonPath("$[?(@.username=='" + user + "')].grants[0].departmentId").value((int) department));
+        catalogPut(target + "/status", admin, token, Map.of("active", true)).andExpect(status().isNoContent());
+        mvc.perform(get(ADMIN_AUTH + "/session").session(tabTwo)).andExpect(status().isUnauthorized());
+        var restored = signIn(ADMIN_AUTH, user, original, new MockHttpSession(), 204);
+        mvc.perform(get(ADMIN_AUTH + "/session").session(restored)).andExpect(jsonPath("$.grants[0].departmentId").value(department));
+        var issued = catalogPost(target + "/password-reset", admin, token, null).andExpect(status().isOk())
+                .andExpect(org.springframework.test.web.servlet.result.MockMvcResultMatchers.header().string("Cache-Control", "no-store"))
+                .andReturn();
+        String first = json.readTree(issued.getResponse().getContentAsByteArray()).get("password").asText();
+        mvc.perform(get(ADMIN_AUTH + "/session").session(restored)).andExpect(status().isUnauthorized());
+        signIn(ADMIN_AUTH, user, original, new MockHttpSession(), 401);
+        var firstLogin = signIn(ADMIN_AUTH, user, first, new MockHttpSession(), 204);
+        jdbc.update("UPDATE sys_user SET temporary_password_expires_at=UTC_TIMESTAMP(3)-INTERVAL 1 SECOND WHERE id=?", id);
+        mvc.perform(get(ADMIN_AUTH + "/session").session(firstLogin)).andExpect(status().isUnauthorized());
+        signIn(ADMIN_AUTH, user, first, new MockHttpSession(), 401);
+        String latest = json.readTree(catalogPost(target + "/password-reset", admin, token, null).andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsByteArray()).get("password").asText();
+        signIn(ADMIN_AUTH, user, first, new MockHttpSession(), 401);
+        var restricted = signIn(ADMIN_AUTH, user, latest, new MockHttpSession(), 204);
+        var restrictedTwo = signIn(ADMIN_AUTH, user, latest, new MockHttpSession(), 204);
+        mvc.perform(get(ADMIN_AUTH + "/session").session(restricted)).andExpect(jsonPath("$.mustChangePassword").value(true))
+                .andExpect(jsonPath("$.grants").isEmpty());
+        mvc.perform(get("/api/v1/admin/appointments").session(restricted)).andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("PASSWORD_CHANGE_REQUIRED"));
+        String ownPassword = "Synthetic-Staff-New!2026";
+        catalogPost(ADMIN_AUTH + "/password", restricted, csrf(ADMIN_AUTH, restricted),
+                Map.of("currentPassword", latest, "newPassword", ownPassword)).andExpect(status().isNoContent());
+        mvc.perform(get(ADMIN_AUTH + "/session").session(restrictedTwo)).andExpect(status().isUnauthorized());
+        signIn(ADMIN_AUTH, user, latest, new MockHttpSession(), 401);
+        var changed = signIn(ADMIN_AUTH, user, ownPassword, new MockHttpSession(), 204);
+        mvc.perform(get("/api/v1/admin/appointments").session(changed)).andExpect(status().isOk());
+        var history = mvc.perform(get(target + "/security-history").session(admin)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.events[*].action").value(org.hamcrest.Matchers.contains(
+                        "PASSWORD_CHANGED", "PASSWORD_RESET", "PASSWORD_RESET", "ENABLED", "DISABLED")))
+                .andReturn().getResponse().getContentAsString();
+        assertThat(history).doesNotContain(latest, first, original, ownPassword);
+    }
+
+    @Test
+    void patientPasswordChangePreservesRecordsAndLeavesTheAdminSideSignedIn() throws Exception {
+        String name = "security-patient", oldPassword = "Synthetic-Patient-Old!2026", newPassword = "Synthetic-Patient-New!2026";
+        var passwords = beanFactory.getBean(org.springframework.security.crypto.password.PasswordEncoder.class);
+        jdbc.update("INSERT INTO sys_user(username,password_hash,display_name,role,status) VALUES (?,?,?,'PATIENT','ACTIVE')",
+                name, passwords.encode(oldPassword), "密码验收患者");
+        var shared = signIn(ADMIN_AUTH, ADMIN, ADMIN_PASSWORD, new MockHttpSession(), 204);
+        shared = signIn(PATIENT_AUTH, name, oldPassword, shared, 204);
+        var second = signIn(PATIENT_AUTH, name, oldPassword, new MockHttpSession(), 204);
+        long department = newClinic("PATIENT-SECURITY");
+        String appointment = bookAndStopForNotices(department, shared, shared, csrf(ADMIN_AUTH, shared), "patient-security");
+        String inbox = "/api/v1/appointment-notifications";
+        var token = csrf(PATIENT_AUTH, shared);
+        catalogPost(inbox + "/" + appointment + "/read", shared, token, Map.of("kind", "STOPPED"))
+                .andExpect(status().isNoContent());
+        catalogPost(PATIENT_AUTH + "/password", shared, token,
+                Map.of("currentPassword", "wrong", "newPassword", newPassword)).andExpect(status().isBadRequest());
+        catalogPost(PATIENT_AUTH + "/password", shared, token,
+                Map.of("currentPassword", oldPassword, "newPassword", newPassword)).andExpect(status().isNoContent());
+        mvc.perform(get(PATIENT_AUTH + "/session").session(shared)).andExpect(status().isUnauthorized());
+        mvc.perform(get(PATIENT_AUTH + "/session").session(second)).andExpect(status().isUnauthorized());
+        mvc.perform(get(ADMIN_AUTH + "/session").session(shared)).andExpect(status().isOk());
+        signIn(PATIENT_AUTH, name, oldPassword, new MockHttpSession(), 401);
+        var rejoined = signIn(PATIENT_AUTH, name, newPassword, new MockHttpSession(), 204);
+        mvc.perform(get("/api/v1/appointments/" + appointment).session(rejoined)).andExpect(status().isOk());
+        mvc.perform(get(inbox).session(rejoined)).andExpect(jsonPath("$.unreadCount").value(0))
+                .andExpect(jsonPath("$.items[0].appointmentNo").value(appointment));
+    }
+
+    @Test
+    void visitCompletionIsOneWayAndReviewKeepsTheOriginalRecord() throws Exception {
+        var admin = signIn(ADMIN_AUTH, ADMIN, ADMIN_PASSWORD, new MockHttpSession(), 204);
+        var adminToken = csrf(ADMIN_AUTH, admin);
+        var patient = signIn(PATIENT_AUTH, "demo-patient", "Mediflow-Demo-A!2026", new MockHttpSession(), 204);
+        var patientToken = csrf(PATIENT_AUTH, patient);
+        long clinicA = newClinic("VISIT-DESK-A"), clinicB = newClinic("VISIT-DESK-B");
+        String password = "Synthetic-Visit-Desk!2026";
+        for (var role : java.util.List.of("TRIAGE", "VISIT_SUPERVISOR")) {
+            catalogPost("/api/v1/admin/staff", admin, adminToken, Map.of("username", "visit-" + role, "displayName", role,
+                    "password", password, "grants", java.util.List.of(Map.of("role", role, "departmentId", clinicA))))
+                    .andExpect(status().isCreated());
+        }
+        var triage = signIn(ADMIN_AUTH, "visit-TRIAGE", password, new MockHttpSession(), 204);
+        var review = signIn(ADMIN_AUTH, "visit-VISIT_SUPERVISOR", password, new MockHttpSession(), 204);
+        var triageToken = csrf(ADMIN_AUTH, triage);
+        var reviewToken = csrf(ADMIN_AUTH, review);
+        var now = java.time.Instant.now();
+        var today = now.atZone(ZoneId.of("Asia/Shanghai")).toLocalDate();
+        long slotA = visitSlot(clinicA, today, now.plusSeconds(120));
+        long slotB = visitSlot(clinicB, today, now.plusSeconds(120));
+        long futureSlot = visitSlot(clinicA, today.plusDays(1), now.plusSeconds(86400));
+        String own = bookVisitFixture(patient, patientToken, slotA, "visit-desk-own");
+        String other = bookVisitFixture(patient, patientToken, slotB, "visit-desk-other");
+        String tomorrow = bookVisitFixture(patient, patientToken, futureSlot, "visit-desk-future");
+        String desk = "/api/v1/admin/appointments";
+        mvc.perform(get(desk).session(triage).param("visitDesk", "TODAY"))
+                .andExpect(jsonPath("$.totalCount").value(1)).andExpect(jsonPath("$.items[0].appointment.appointmentNo").value(own));
+        mvc.perform(get(desk).session(triage).param("visitDesk", "REVIEW")).andExpect(status().isForbidden());
+        String target = desk + "/" + own;
+        catalogPost(target + "/visit-completion", triage, triageToken, null).andExpect(status().isConflict());
+        catalogPost(desk + "/" + other + "/visit-completion", triage, triageToken, null).andExpect(status().isForbidden());
+        catalogPost(desk + "/" + tomorrow + "/visit-completion", triage, triageToken, null).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("只可登记当日预约的就诊结果。"));
+        catalogPost(target + "/check-in", triage, triageToken, null).andExpect(status().isOk());
+        var nextDayClock = java.time.Clock.fixed(today.plusDays(1).atStartOfDay(ZoneId.of("Asia/Shanghai")).toInstant(), java.time.ZoneOffset.UTC);
+        var nextDay = new AppointmentQueryService(jdbc.getDataSource(), nextDayClock);
+        var closed = nextDay.findForPatient(own, 1001).orElseThrow();
+        assertThat(closed.status()).isEqualTo("VISIT_UNCONFIRMED");
+        assertThat(closed.checkedInAt()).isNotNull();
+        assertThat(nextDay.patientOverview(1001, 1, 1).history().items()).anyMatch(item -> item.appointmentNo().equals(own));
+
+        // An appointment may be registered later that same day, after its scheduled slot ends.
+        jdbc.update("UPDATE appointment_slot SET start_at=?, end_at=? WHERE id=?", java.sql.Timestamp.from(now.minusSeconds(900)),
+                java.sql.Timestamp.from(now.minusSeconds(1)), slotA);
+        catalogPost(target + "/visit-completion", review, reviewToken, null).andExpect(status().isForbidden());
+        catalogPost(target + "/visit-completion", triage, triageToken, null).andExpect(status().isNoContent());
+        catalogPost(target + "/visit-completion", triage, triageToken, null).andExpect(status().isConflict());
+        mvc.perform(get("/api/v1/appointments/" + own).session(patient))
+                .andExpect(jsonPath("$.status").value("VISITED")).andExpect(jsonPath("$.visitProgress.completedAt").isString());
+        var invalidate = Map.of("outcome", "UNCONFIRMED", "reason", "诊室反馈的预约编号有误。");
+        catalogPost(target + "/visit-review", triage, triageToken, invalidate).andExpect(status().isForbidden());
+        catalogPost(desk + "/" + other + "/visit-review", review, reviewToken, invalidate).andExpect(status().isForbidden());
+        catalogPost(target + "/visit-review", review, reviewToken, invalidate).andExpect(status().isNoContent());
+        catalogPost(target + "/visit-review", review, reviewToken, invalidate).andExpect(status().isConflict());
+        mvc.perform(get("/api/v1/appointments/" + own).session(patient))
+                .andExpect(jsonPath("$.status").value("VISITED")).andExpect(jsonPath("$.checkedInAt").isString())
+                .andExpect(jsonPath("$.visitProgress.reviewedOutcome").value("UNCONFIRMED"))
+                .andExpect(jsonPath("$.visitProgress.reason").doesNotExist());
+        var reviewed = mvc.perform(get(desk).session(review).param("visitDesk", "REVIEW").param("status", "VISIT_UNCONFIRMED")
+                        .param("appointmentNo", own)).andExpect(jsonPath("$.totalCount").value(1)).andReturn();
+        long reviewId = json.readTree(reviewed.getResponse().getContentAsByteArray()).get("items").get(0).get("visitReviewId").asLong();
+        mvc.perform(get(desk).session(triage).param("visitDesk", "TODAY").param("status", "VISITED").param("appointmentNo", own))
+                .andExpect(jsonPath("$.totalCount").value(0));
+        catalogPost(target + "/visit-review", review, reviewToken,
+                Map.of("outcome", "CONFIRMED", "expectedReviewId", reviewId, "reason", "科室已核对本次接诊结果。"))
+                .andExpect(status().isNoContent());
+        mvc.perform(get(desk).session(triage).param("visitDesk", "TODAY").param("status", "VISITED").param("appointmentNo", own))
+                .andExpect(jsonPath("$.totalCount").value(1));
+        mvc.perform(get(target + "/operations").session(review))
+                .andExpect(jsonPath("$.events.items[0].action").value("APPOINTMENT_VISIT_REVIEW"))
+                .andExpect(jsonPath("$.events.items[1].reason").value("结果待核实 · 诊室反馈的预约编号有误。"))
+                .andExpect(jsonPath("$.events.items[2].action").value("APPOINTMENT_VISITED"));
+        assertThat(jdbc.queryForObject("SELECT status FROM appointment_slot WHERE id=?", String.class, slotA)).isEqualTo("RESERVED");
+        mvc.perform(get("/api/v1/admin/observability/appointments").session(admin)
+                        .param("from", today.toString()).param("to", today.toString()).param("departmentId", Long.toString(clinicA)))
+                .andExpect(jsonPath("$.totals.booked").value(1));
+    }
+
+    private long visitSlot(long clinic, LocalDate date, java.time.Instant start) {
+        long doctor = jdbc.queryForObject("SELECT id FROM doctor WHERE department_id=?", Long.class, clinic);
+        jdbc.update("INSERT INTO doctor_schedule(doctor_id,schedule_date,clinic_period,status) VALUES (?,?,'MORNING','OPEN')", doctor, date);
+        long schedule = scheduleFor(doctor, date);
+        jdbc.update("INSERT INTO appointment_slot(schedule_id,slot_no,start_at,end_at,status) VALUES (?,1,?,?,'AVAILABLE')",
+                schedule, java.sql.Timestamp.from(start), java.sql.Timestamp.from(start.plusSeconds(900)));
+        return firstSlot(schedule);
+    }
+
+    private String bookVisitFixture(MockHttpSession patient, Csrf token, long slot, String key) throws Exception {
+        return json.readTree(catalogPost("/api/v1/appointments", patient, token, Map.of("slotId", slot, "idempotencyKey", key))
+                .andExpect(jsonPath("$.success").value(true)).andReturn().getResponse().getContentAsByteArray()).get("appointmentNo").asText();
     }
 
     private long newClinic(String code) {

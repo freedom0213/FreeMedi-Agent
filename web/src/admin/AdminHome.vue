@@ -2,8 +2,8 @@
 import { computed, ref } from 'vue'
 import { ArrowRight, RefreshCw } from 'lucide-vue-next'
 import {
-  adminSession, readAppointmentOperations, readDocuments, readKnowledgeLibrary,
-  readModelCallAttempts, readModelCallOverview,
+  adminHas, adminSession, canOpenAdmin, readAppointmentOperations, readDocuments, readKnowledgeLibrary,
+  readModelCallAttempts, readModelCallOverview, readPendingArrangements,
 } from '../api/admin'
 import { clock, observedModelLabel, reasons } from './agentTraceLabels'
 import { hospitalDay } from './hospitalCalendar'
@@ -11,8 +11,13 @@ import { useKnowledgeRead } from './useKnowledgeRead'
 
 const today = ref(hospitalDay())
 const dates = computed(() => ({ from: today.value, to: today.value }))
-const visits = useKnowledgeRead(signal => readAppointmentOperations(dates.value, signal))
+const showOverview = adminHas('SUPER_ADMIN')
+const showKnowledge = canOpenAdmin('admin-knowledge')
+const showPending = adminHas('SCHEDULER')
+const pending = useKnowledgeRead(signal => showPending ? readPendingArrangements(signal) : Promise.resolve(undefined))
+const visits = useKnowledgeRead(signal => showOverview ? readAppointmentOperations(dates.value, signal) : Promise.resolve(undefined))
 const knowledge = useKnowledgeRead(async signal => {
+  if (!showKnowledge) return undefined
   const [documents, groups] = await Promise.all([readDocuments(signal), readKnowledgeLibrary(signal)])
   return {
     drafts: documents.filter(row => row.draftVersion != null).length,
@@ -20,6 +25,7 @@ const knowledge = useKnowledgeRead(async signal => {
   }
 })
 const calls = useKnowledgeRead(async signal => {
+  if (!showOverview) return undefined
   const range = dates.value
   const overview = await readModelCallOverview(range, signal)
   const failed = overview.totals.failed
@@ -28,9 +34,15 @@ const calls = useKnowledgeRead(async signal => {
   const latest = items[0]
   return { failed, latest, model: overview.options.find(option => option.key === latest?.modelKey) }
 })
+const shortcuts = [
+  ['admin-schedules', '查看负责科室排班'], ['admin-today-triage', '查看今日分诊'],
+  ['admin-appointments', '核对预约和签到'], ['admin-visit-review', '复核就诊结果'],
+  ['admin-staff', '管理岗位账号'], ['admin-setup', '查看首次启用配置'],
+].filter(([name]) => canOpenAdmin(name))
 
-const running = computed(() => [knowledge, visits, calls].some(section => section.state.value === 'loading'))
-const expired = computed(() => [knowledge, visits, calls].some(section => section.state.value === 'session'))
+const sections = [pending, knowledge, visits, calls]
+const running = computed(() => sections.some(section => section.state.value === 'loading'))
+const expired = computed(() => sections.some(section => section.state.value === 'session'))
 const counts = computed(() => visits.data.value ? [
   { label: '开放排班', value: visits.data.value.openSchedules, unit: '场', to: { name: 'admin-schedules', query: { ...dates.value, status: 'OPEN' } } },
   { label: '有效预约', value: visits.data.value.totals.booked, unit: '笔', to: { name: 'admin-visit-operations', query: dates.value } },
@@ -40,9 +52,7 @@ const number = new Intl.NumberFormat('zh-CN')
 
 function refresh() {
   today.value = hospitalDay()
-  knowledge.reload()
-  visits.reload()
-  calls.reload()
+  sections.forEach(section => section.reload())
 }
 </script>
 
@@ -58,7 +68,30 @@ function refresh() {
   <p v-if="expired" class="admin-form-error" role="alert">
     管理员会话已失效。<RouterLink class="admin-text-link" :to="{ name: 'admin-login' }">重新登录</RouterLink>
   </p>
-  <section class="admin-panel workbench-knowledge" aria-labelledby="workbench-knowledge">
+  <p v-if="$route.query.denied" class="admin-form-error" role="alert">当前岗位没有访问该页面的权限。</p>
+  <section v-if="showPending" class="admin-panel workbench-pending" aria-labelledby="workbench-pending">
+    <header class="admin-panel-toolbar"><h2 id="workbench-pending">停诊待办</h2></header>
+    <p v-if="pending.state.value === 'loading'" class="admin-empty" role="status">正在读取停诊待办…</p>
+    <div v-else-if="pending.state.value === 'error'" class="admin-empty" role="alert">
+      停诊待办加载失败。<button class="admin-button" type="button" @click="pending.reload">重试停诊待办</button>
+    </div>
+    <div v-else-if="pending.data.value" class="workbench-queue">
+      <RouterLink :to="{ name: 'admin-appointments', query: { status: 'INTERRUPTED', pendingArrangement: 'true' } }">
+        <strong>待安排的停诊预约</strong>
+        <span class="workbench-value">{{ number.format(pending.data.value.count) }} <small>笔</small></span>
+        <ArrowRight :size="17" aria-hidden="true" />
+      </RouterLink>
+    </div>
+  </section>
+  <section v-if="!adminHas('SUPER_ADMIN') && shortcuts.length" class="admin-panel" aria-labelledby="workbench-shortcuts">
+    <header class="admin-panel-toolbar"><h2 id="workbench-shortcuts">常用入口</h2></header>
+    <div class="workbench-queue">
+      <RouterLink v-for="[name, label] in shortcuts" :key="name" :to="{ name }">
+        <strong>{{ label }}</strong><span></span><ArrowRight :size="16" aria-hidden="true" />
+      </RouterLink>
+    </div>
+  </section>
+  <section v-if="canOpenAdmin('admin-knowledge')" class="admin-panel workbench-knowledge" aria-labelledby="workbench-knowledge">
     <header class="admin-panel-toolbar">
       <h2 id="workbench-knowledge">知识库待处理</h2>
       <RouterLink class="admin-text-link" :to="{ name: 'admin-knowledge' }">查看院内资料 <ArrowRight :size="15" aria-hidden="true" /></RouterLink>
@@ -81,7 +114,7 @@ function refresh() {
     </div>
   </section>
 
-  <div class="workbench-secondary">
+  <div v-if="adminHas('SUPER_ADMIN')" class="workbench-secondary">
     <section class="admin-panel" aria-labelledby="workbench-visits">
       <header class="admin-panel-toolbar"><h2 id="workbench-visits">今日门诊</h2></header>
       <p v-if="visits.state.value === 'loading'" class="admin-empty" role="status">正在读取今日排班与号源…</p>
@@ -131,6 +164,7 @@ function refresh() {
 <style scoped>
 .workbench-heading p { margin: 5px 0 0; }
 .workbench-heading button { flex: none; }
+.workbench-pending { margin-bottom: 16px; }
 .workbench-knowledge { border-color: #cadaf0; }
 .workbench-knowledge .admin-panel-toolbar { background: #eef4ff; border-radius: 8px 8px 0 0; flex-wrap: wrap; }
 .workbench-queue a { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px;

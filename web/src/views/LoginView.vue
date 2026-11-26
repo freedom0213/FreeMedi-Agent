@@ -30,11 +30,12 @@ async function submit() {
 </script>
 
 <template>
-  <AppShell>
+  <AppShell v-slot="{ hospital }">
     <div class="page-wrap login-page">
       <form class="login-card" @submit.prevent="submit">
         <h1>患者登录</h1>
         <p>登录后可预约挂号并查看本人的就诊记录。</p>
+        <p v-if="route.query.reason === 'password-changed'" role="status">密码已修改，请使用新密码登录。</p>
         <label>账号
           <input v-model="username" name="username" autocomplete="username" required maxlength="64" :disabled="busy" />
         </label>
@@ -43,6 +44,11 @@ async function submit() {
         </label>
         <p v-if="error" class="login-error" role="alert">{{ error }}</p>
         <button class="button-primary" type="submit" :disabled="busy">{{ busy ? '登录中…' : '登录' }}</button>
+        <details class="forgot-password">
+          <summary>忘记密码</summary>
+          <p>请联系院方账号服务人员，完成身份核验后办理密码重置。</p>
+          <p v-if="hospital?.contact">院方联系方式 {{ hospital.contact }}</p>
+        </details>
       </form>
     </div>
   </AppShell>
@@ -56,4 +62,6 @@ p { margin: 0; font-size: 14px; color: var(--ink-soft); }
 label { display: grid; gap: 7px; font-size: 13px; }
 input { min-height: 42px; width: 100%; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: 6px; color: var(--ink); }
 .login-error { color: var(--red); }
+.forgot-password summary { cursor: pointer; color: var(--ink); font-size: 14px; }
+.forgot-password p { margin-top: 7px; }
 </style>

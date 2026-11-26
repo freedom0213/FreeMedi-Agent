@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { Activity, ChartNoAxesColumnIncreasing, ChevronDown, ChevronRight, Cross, Database, Files, LayoutDashboard, LogOut, Menu, SlidersHorizontal } from 'lucide-vue-next'
+import { Activity, ChartNoAxesColumnIncreasing, ChevronDown, ChevronRight, Cross, Database, Files, LayoutDashboard, LogOut, Menu, Settings, SlidersHorizontal } from 'lucide-vue-next'
 import { useRoute } from 'vue-router'
-import { adminLogout, adminSession } from '../api/admin'
+import { adminLogout, adminRoleLabels, adminSession, canOpenAdmin } from '../api/admin'
 import './admin.css'
 
 const groups = [
@@ -11,6 +11,8 @@ const groups = [
     { name: 'admin-doctors', label: '医生管理' },
     { name: 'admin-schedules', label: '排班管理' },
     { name: 'admin-appointments', label: '预约明细' },
+    { name: 'admin-today-triage', label: '今日分诊' },
+    { name: 'admin-visit-review', label: '就诊结果复核' },
   ] },
   { id: 'ai', label: 'AI 能力配置', icon: SlidersHorizontal, pages: [
     { name: 'admin-model-config', label: 'AI 模型配置' },
@@ -31,9 +33,16 @@ const groups = [
     { name: 'admin-agent-timeline', label: 'Agent 执行时间线' },
     { name: 'admin-model-calls', label: 'AI 调用观测' },
   ] },
+  { id: 'settings', label: '系统设置', icon: Settings, pages: [
+    { name: 'admin-staff', label: '岗位账号' },
+    { name: 'admin-setup', label: '首次启用' },
+  ] },
 ]
 
 const route = useRoute()
+const visibleGroups = computed(() => groups.map(group => ({ ...group, pages: group.pages.filter(page => canOpenAdmin(page.name)) }))
+  .filter(group => group.pages.length))
+const roleNames = computed(() => [...new Set(adminSession.value?.grants?.map(grant => adminRoleLabels[grant.role]))].join('、'))
 const isKnowledgeDetail = computed(() => route.name === 'admin-document' || route.name === 'admin-knowledge-import')
 const selectedName = computed(() => isKnowledgeDetail.value ? 'admin-knowledge' : route.name)
 const selectedGroup = computed(() => groups.find(group => group.pages.some(page => page.name === selectedName.value)))
@@ -94,7 +103,7 @@ async function logout() {
           <RouterLink :to="{ name: 'admin-home' }" :class="{ 'admin-menu-current': route.name === 'admin-home' }">
             <LayoutDashboard :size="18" aria-hidden="true" /> 工作台首页
           </RouterLink>
-          <div v-for="group in groups" :key="group.id">
+          <div v-for="group in visibleGroups" :key="group.id">
             <button class="admin-menu-toggle" type="button" :aria-expanded="expanded.includes(group.id)"
               :aria-controls="'admin-menu-' + group.id" :class="{ 'admin-menu-group-current': selectedGroup?.id === group.id }"
               @click="toggle(group.id)">
@@ -129,7 +138,9 @@ async function logout() {
             <span aria-current="page">{{ route.name === 'admin-document' ? '版本详情' : '导入预览' }}</span>
           </template>
         </nav>
-        <div class="admin-profile"><span>{{ adminSession?.displayName }}</span></div>
+        <div class="admin-profile"><span>{{ adminSession?.displayName }}</span><small v-if="roleNames">{{ roleNames }}</small>
+          <RouterLink class="admin-text-link" :to="{ name: 'admin-password' }">修改密码</RouterLink>
+        </div>
       </header>
       <main ref="content" class="admin-content" aria-label="管理端内容" tabindex="0">
         <div class="admin-page">

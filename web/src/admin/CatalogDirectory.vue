@@ -185,7 +185,7 @@ function clearFilters() {
           <th scope="col">状态</th><th scope="col">操作</th>
         </tr></thead>
         <tbody><tr v-for="row in items" :key="row.id">
-          <th scope="row">{{ row.name }}</th>
+          <th scope="row">{{ row.name }}<small v-if="'departmentId' in row && row.importCode">{{ row.importCode }}</small></th>
           <template v-if="'departmentId' in row"><td>{{ row.departmentName }}</td><td>{{ row.title || '—' }}</td><td>{{ row.specialty || '—' }}</td></template>
           <template v-else><td>{{ row.code }}</td><td>{{ row.description || '—' }}</td></template>
           <td><span class="catalog-status" :data-active="row.status === 'ACTIVE'">{{ row.status === 'ACTIVE' ? '已启用' : '已停用' }}</span></td>

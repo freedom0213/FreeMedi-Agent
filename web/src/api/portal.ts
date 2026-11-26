@@ -1,4 +1,6 @@
 import type {
+  AppointmentInbox,
+  AppointmentNoticeKind,
   AppointmentRecord,
   AppointmentOverview,
   AvailableSlot,
@@ -9,6 +11,10 @@ import type {
   SlotSearchResponse,
 } from '../types/portal'
 import { http } from './http'
+
+export async function readHospital() {
+  return (await http.get<{ name: string; contact: string; demo: boolean; bookingEnabled: boolean }>('/hospital')).data
+}
 
 export async function listDepartments(): Promise<Department[]> {
   const { data } = await http.get<Department[]>('/departments')
@@ -70,6 +76,14 @@ export async function getAppointment(appointmentNo: string): Promise<Appointment
   return data
 }
 
+export async function readAppointmentNotifications(page: number, signal: AbortSignal): Promise<AppointmentInbox> {
+  return (await http.get<AppointmentInbox>('/appointment-notifications', { params: { page }, signal })).data
+}
+
+export async function markAppointmentNoticeRead(appointmentNo: string, kind: AppointmentNoticeKind): Promise<void> {
+  await http.post(`/appointment-notifications/${encodeURIComponent(appointmentNo)}/read`, { kind }, { timeout: 10_000 })
+}
+
 export async function cancelAppointment(appointmentNo: string): Promise<LifecycleResult> {
   const { data } = await http.post<LifecycleResult>('/appointments/' + encodeURIComponent(appointmentNo) + '/cancel')
   return data
@@ -81,6 +95,17 @@ const hospitalDateTime = new Intl.DateTimeFormat('zh-CN', {
 
 export function formatHospitalDateTime(value: string) {
   return hospitalDateTime.format(new Date(value))
+}
+
+export function visitOutcomeConfirmed(appointment: AppointmentRecord) {
+  const review = appointment.visitProgress?.reviewedOutcome
+  return review ? review === 'CONFIRMED' : appointment.status === 'VISITED'
+}
+
+export function visitOutcomeLabel(appointment: AppointmentRecord) {
+  if (appointment.visitProgress?.reviewedOutcome === 'UNCONFIRMED') return '就诊结果待核实'
+  if (visitOutcomeConfirmed(appointment)) return '已就诊'
+  if (appointment.status === 'VISIT_UNCONFIRMED') return '已结束（结果未确认）'
 }
 
 export function cancellationNotice(deadline?: string) {

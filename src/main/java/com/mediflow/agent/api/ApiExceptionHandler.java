@@ -8,9 +8,15 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.server.ResponseStatusException;
 
 @RestControllerAdvice
 public class ApiExceptionHandler {
+    @ExceptionHandler(ResponseStatusException.class)
+    ResponseEntity<Map<String, String>> responseStatus(ResponseStatusException exception) {
+        return ResponseEntity.status(exception.getStatusCode()).body(Map.of("error",
+                exception.getReason() == null ? "请求无法处理。" : exception.getReason()));
+    }
     @ExceptionHandler(OptimisticLockingFailureException.class)
     ResponseEntity<Map<String, String>> changed() {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(Map.of("error", "预约任务已更新，请刷新后再试。"));

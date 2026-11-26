@@ -2,7 +2,16 @@ import axios from 'axios'
 import type { AppointmentRecord, LifecycleResult } from '../types/portal'
 import { shallowRef } from 'vue'
 
-interface AdminSession { adminId: string; displayName: string }
+export type AdminRole = 'SUPER_ADMIN' | 'SYSTEM_ADMIN' | 'SCHEDULER' | 'TRIAGE' | 'KNOWLEDGE' | 'VISIT_SUPERVISOR'
+export interface AdminGrant { role: AdminRole; departmentId: number | null }
+interface AdminSession {
+  adminId: string; displayName: string; grants?: AdminGrant[]; scheduleRules?: HospitalRules | null; mustChangePassword?: boolean
+}
+export const adminRoleLabels: Record<AdminRole, string> = {
+  SUPER_ADMIN: '超级管理员', SYSTEM_ADMIN: '系统管理员', SCHEDULER: '排班员',
+  TRIAGE: '分诊员', KNOWLEDGE: '知识库管理员',
+  VISIT_SUPERVISOR: '就诊复核负责人',
+}
 interface CsrfResponse { headerName: string; token: string; adminId: string | null }
 type SessionState = 'signed-in' | 'signed-out' | 'forbidden' | 'unavailable'
 type ArchiveResult = 'archived' | 'conflict' | 'session' | 'unknown'
@@ -187,6 +196,22 @@ type DraftResult<T> = { kind: 'ready'; data: T } | { kind: 'issue'; message: str
 
 const adminHttp = axios.create({ baseURL: '/api/v1/admin', timeout: 10_000 })
 export const adminSession = shallowRef<AdminSession | null>(null)
+export function adminHas(role: AdminRole, departmentId?: number) {
+  const session = adminSession.value
+  return !!session && (!session.grants || session.grants.some(grant => grant.role === 'SUPER_ADMIN' ||
+    (grant.role === role && (departmentId === undefined || grant.departmentId === departmentId))))
+}
+
+export function canOpenAdmin(name: unknown) {
+  if (adminHas('SUPER_ADMIN') || name === 'admin-home' || name === 'admin-password') return true
+  if (name === 'admin-schedules') return adminHas('SCHEDULER')
+  if (name === 'admin-appointments') return adminHas('SCHEDULER') || adminHas('TRIAGE')
+  if (name === 'admin-today-triage') return adminHas('TRIAGE')
+  if (name === 'admin-visit-review') return adminHas('VISIT_SUPERVISOR')
+  if (name === 'admin-document' || (typeof name === 'string' && name.startsWith('admin-knowledge'))) return adminHas('KNOWLEDGE')
+  return adminHas('SYSTEM_ADMIN') && ['admin-departments', 'admin-doctors', 'admin-model-config',
+    'admin-prompt-templates', 'admin-tool-registry', 'admin-staff', 'admin-setup'].includes(String(name))
+}
 const sessionChanges = new BroadcastChannel('freemedi-admin-session')
 sessionChanges.onmessage = () => {
   if (/^\/admin(?:\/|$)/.test(window.location.pathname)) window.location.reload()
@@ -287,7 +312,8 @@ export const retryKnowledgeIndex = (chunkId: number) =>
 export function agentSettingsError(error: unknown) {
   if (axios.isAxiosError(error)) {
     const status = error.response?.status
-    if (status === 401 || status === 403) return '管理员会话已失效，请重新登录。'
+    if (status === 401) return '管理员会话已失效，请重新登录。'
+    if (status === 403) return '当前岗位没有权限执行此操作。'
     const detail = error.response?.data?.error ?? error.response?.data?.message
     if (typeof detail === 'string' && /^[\u4e00-\u9fff]/u.test(detail)) return detail
     if (status === 409) return '配置已更新或尚未通过测试。请重新加载后核对。'
@@ -345,11 +371,12 @@ export interface CatalogOption { id: number; name: string; status: CatalogStatus
 export interface DepartmentRow extends CatalogOption { code: string; description: string | null }
 export interface DoctorRow extends CatalogOption {
   departmentId: number; departmentName: string; title: string | null; specialty: string | null; introduction: string | null
+  importCode?: string
 }
 export interface ScheduleRow {
   id: number; departmentId: number; departmentName: string; doctorId: number; doctorName: string
   scheduleDate: string; clinicPeriod: ClinicPeriod; status: 'OPEN' | 'CLOSED'
-  slots: number; remaining: number; booked: number
+  slots: number; remaining: number; booked: number; interrupted?: boolean
 }
 export interface ScheduleDetail {
   schedule: ScheduleRow
@@ -359,13 +386,20 @@ export interface ScheduleInput {
   departmentId: number; doctorId: number; date: string; period: ClinicPeriod; start: string; minutes: number; count: number
 }
 type CatalogPage<T> = { items: T[]; page: number; hasNext: boolean; totalPages?: number }
-export interface AdminAppointmentRow { scheduleId: number; appointment: AppointmentRecord }
+export interface AdminAppointmentRow {
+  scheduleId: number; appointment: AppointmentRecord; patientName?: string | null; checkInAllowed?: boolean
+  visitCompletionAllowed?: boolean; visitReviewAllowed?: boolean; visitReviewId?: number | null
+}
+export type VisitDesk = 'TODAY' | 'REVIEW'
 type CatalogFilters = { q?: string; status?: string; departmentId?: number; doctorId?: number; from?: string; to?: string;
-  appointmentNo?: string; scheduleId?: number; channel?: string; page: number }
+  appointmentNo?: string; scheduleId?: number; channel?: string; pendingArrangement?: string; visitDesk?: VisitDesk; page: number }
 const catalogPath = '/catalog/'
 export async function readCatalog<T>(kind: CatalogListKind, params: CatalogFilters, signal: AbortSignal) {
   const path = kind === 'appointments' ? '/appointments' : catalogPath + kind
   return (await adminHttp.get<CatalogPage<T>>(path, { params, signal })).data
+}
+export async function readPendingArrangements(signal: AbortSignal) {
+  return (await adminHttp.get<{ count: number }>('/appointments/interruption-pending/count', { signal })).data
 }
 export async function readCatalogOptions(kind: CatalogKind, signal: AbortSignal, departmentId?: number) {
   return (await adminHttp.get<CatalogOption[]>(catalogPath + kind + '/options', { params: { departmentId }, signal })).data
@@ -382,6 +416,73 @@ export async function readScheduleDetail(id: number, signal: AbortSignal) {
 export const createSchedule = (input: ScheduleInput) => writeAgentSettings<void>('post', catalogPath + 'schedules', input)
 export const checkInAppointment = (number: string) =>
   writeAgentSettings<LifecycleResult>('post', '/appointments/' + encodeURIComponent(number) + '/check-in', undefined)
+export type VisitReviewOutcome = 'CONFIRMED' | 'UNCONFIRMED'
+export const completeVisit = (number: string) =>
+  writeAgentSettings<void>('post', '/appointments/' + encodeURIComponent(number) + '/visit-completion', undefined)
+export const reviewVisit = (number: string, outcome: VisitReviewOutcome, reason: string, expectedReviewId: number | null) =>
+  writeAgentSettings<void>('post', '/appointments/' + encodeURIComponent(number) + '/visit-review',
+    { outcome, reason, expectedReviewId })
+
+interface StaffInput { username: string; displayName: string; password: string; grants: AdminGrant[] }
+export interface StaffMember {
+  id: number; username: string; displayName: string; grants: AdminGrant[]
+  status: 'ACTIVE' | 'DISABLED'; temporaryPasswordExpiresAt: string | null
+}
+export interface TemporaryPassword { password: string; expiresAt: string }
+export interface StaffSecurityEvent {
+  id: number; operator: string; action: 'DISABLED' | 'ENABLED' | 'PASSWORD_RESET' | 'PASSWORD_CHANGED'; occurredAt: string
+}
+export interface StaffSecurityHistory { events: StaffSecurityEvent[]; nextBefore: number | null }
+export const readStaff = async (signal: AbortSignal) => (await adminHttp.get<StaffMember[]>('/staff', { signal })).data
+export const saveStaff = (id: number | undefined, input: StaffInput) => id === undefined
+  ? writeAgentSettings<void>('post', '/staff', input)
+  : writeAgentSettings<void>('put', '/staff/' + id + '/grants', { grants: input.grants })
+export const setStaffActive = (id: number, active: boolean) => writeAgentSettings<void>('put', '/staff/' + id + '/status', { active })
+export const resetStaffPassword = (id: number) => writeAgentSettings<TemporaryPassword>('post', '/staff/' + id + '/password-reset', undefined)
+export const readStaffSecurityHistory = async (id: number, before: number | undefined, signal: AbortSignal) =>
+  (await adminHttp.get<StaffSecurityHistory>('/staff/' + id + '/security-history', { params: { before }, signal })).data
+
+export async function changeAdminPassword(currentPassword: string, newPassword: string) {
+  await writeAgentSettings<void>('post', '/auth/password', { currentPassword, newPassword })
+  adminSession.value = null
+  sessionChanges.postMessage('changed')
+  window.location.replace('/admin/login?reason=password-changed')
+}
+
+export interface ScheduleInterruptionPreview {
+  token: string; firstStart: string; appointments: { appointmentNo: string; timeRange: string }[]
+}
+export interface ScheduleInterruptionResult { reason: string; stoppedAt: string; affected: number }
+const interruptionPath = (id: number) => '/catalog/schedules/' + id + '/interruption'
+export const previewInterruption = async (id: number) =>
+  (await adminHttp.get<ScheduleInterruptionPreview>(interruptionPath(id) + '/preview')).data
+export const readInterruption = async (id: number) =>
+  (await adminHttp.get<ScheduleInterruptionResult>(interruptionPath(id))).data
+export const confirmInterruption = (id: number, requestId: string, token: string, reason: string) =>
+  writeAgentSettings<ScheduleInterruptionResult>('post', interruptionPath(id), { requestId, token, reason })
+export const arrangementLabels = { SUBSTITUTE: '已另行安排', FOLLOW_UP: '需联系院方', REBOOK: '建议重新挂号' }
+export type ArrangementOutcome = keyof typeof arrangementLabels
+export const saveArrangement = (number: string, outcome: ArrangementOutcome, note: string) =>
+  writeAgentSettings<void>('put', '/appointments/' + encodeURIComponent(number) + '/arrangement', { outcome, note })
+
+export interface HospitalRules { scheduleDays: number; patientDays: number; cancellationCutoff: string; checkInLead: number }
+export interface HospitalSetup {
+  profile: { name: string; contact: string; activatedAt: string | null }
+  rules: HospitalRules; defaults: HospitalRules; timezone: string; required: boolean
+  checks: { departments: number; doctors: number; schedules: number }
+}
+export type ImportKind = 'DEPARTMENTS' | 'DOCTORS' | 'SCHEDULES'
+export interface CatalogImportPreview {
+  token: string; rows: { line: number; key: string; state: 'CREATE' | 'SKIP' | 'ERROR'; message: string }[]
+}
+export const readHospitalSetup = async (signal?: AbortSignal) =>
+  (await adminHttp.get<HospitalSetup>('/setup', { signal })).data
+export const activateHospitalSetup = (settings: HospitalRules & { name: string; contact: string }) =>
+  writeAgentSettings<HospitalSetup>('put', '/setup/activate', settings)
+export const previewCatalogImport = (kind: ImportKind, csv: string) =>
+  writeAgentSettings<CatalogImportPreview>('post', '/setup/import/preview', { kind, csv })
+export const commitCatalogImport = (kind: ImportKind, csv: string, token: string) =>
+  writeAgentSettings<number>('post', '/setup/import/commit', { kind, csv, token })
 export interface AppointmentOperation {
   time: string
   action: string

@@ -11,6 +11,8 @@ const password = ref('')
 const error = ref('')
 const working = ref(false)
 const hint = computed(() => {
+  if (route.query.reason === 'password-changed') return '密码已修改，请使用新密码登录。'
+  if (route.query.reason === 'expired') return '会话已失效，请重新登录。'
   if (route.query.reason === 'forbidden') return '当前无法使用管理端，请使用有权限的管理员账号登录。'
   if (route.query.reason === 'unavailable') return '暂时无法连接管理服务。请确认已启动本地后端后再登录。'
   return ''

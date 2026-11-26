@@ -62,11 +62,16 @@ export interface AppointmentRecord {
   cancellationDeadline?: string
   checkInOpensAt?: string
   checkedInAt?: string | null
+  appointmentEndsAt?: string
   cancelledAt?: string | null
   canCancel?: boolean
   canCheckIn?: boolean
   originalAppointmentNo?: string | null
   replacementAppointmentNo?: string | null
+  interruption?: {
+    reason: string; at: string; outcome: 'SUBSTITUTE' | 'FOLLOW_UP' | 'REBOOK' | null; arrangement: string | null
+  } | null
+  visitProgress?: { completedAt: string | null; reviewedOutcome: 'CONFIRMED' | 'UNCONFIRMED' | null; reviewedAt: string | null } | null
   slotId: number
   appointmentDate: string
   clinicPeriod: string
@@ -89,4 +94,24 @@ export interface AppointmentOverview {
   next: AppointmentRecord | null
   upcoming: AppointmentPage
   history: AppointmentPage
+  interrupted?: AppointmentRecord[]
+}
+
+export type AppointmentNoticeKind = 'STOPPED' | 'ARRANGEMENT'
+
+export interface AppointmentNotice {
+  appointmentNo: string
+  kind: AppointmentNoticeKind
+  occurredAt: string
+  appointmentDate: string
+  departmentName: string
+  doctorName: string
+  unread: boolean
+}
+
+export interface AppointmentInbox {
+  items: AppointmentNotice[]
+  unreadCount: number
+  page: number
+  totalPages: number
 }

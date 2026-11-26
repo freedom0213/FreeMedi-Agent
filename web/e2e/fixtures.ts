@@ -136,6 +136,8 @@ class PatientApi {
     }
 
     switch (key) {
+      case 'GET /hospital': return json({ name: '', contact: '', demo: true, bookingEnabled: true })
+      case 'GET /appointment-notifications': return json({ items: [], unreadCount: 0, page: 1, totalPages: 0 })
       case 'GET /auth/session': return json({ patientId: '1001', displayName: '前端演示患者' })
       case 'GET /auth/csrf': return json({ patientId: '1001', headerName: 'x-csrf-token', token: 'frontend-e2e' })
       case 'GET /departments': return json(departments)

@@ -1,5 +1,6 @@
 export function emptyWorkbenchResponse(url: URL) {
   const path = url.pathname
+  if (path === '/api/v1/admin/appointments/interruption-pending/count') return { count: 0 }
   if (path === '/api/v1/admin/knowledge/documents' || path === '/api/v1/admin/knowledge/library') return []
   if (path === '/api/v1/admin/observability/appointments') return {
     from: url.searchParams.get('from'), to: url.searchParams.get('to'), openSchedules: 0,

@@ -32,11 +32,6 @@ import org.springframework.transaction.annotation.Transactional;
 public class SlotQueryService {
     public static final int DEFAULT_LIMIT = 20;
     public static final int MAX_LIMIT = 50;
-    /** How far ahead the synthetic hospital publishes clinics. */
-    public static final int SCHEDULE_HORIZON_DAYS = 90;
-
-    public static final int PATIENT_WINDOW_DAYS = 28;
-
     public record PortalPage(List<AvailableSlot> slots, LocalDate startDate, LocalDate endDate,
                              int page, int totalCount, int totalPages) {}
 
@@ -45,10 +40,12 @@ public class SlotQueryService {
 
     private final JdbcTemplate jdbc;
     private final Clock clock;
+    private final HospitalRules rules;
 
-    public SlotQueryService(DataSource dataSource, Clock clock) {
+    public SlotQueryService(DataSource dataSource, Clock clock, HospitalRules rules) {
         this.jdbc = new JdbcTemplate(dataSource);
         this.clock = clock;
+        this.rules = rules;
     }
 
     /** The hospital's current date. Search windows and date parsing both start from here. */
@@ -60,8 +57,10 @@ public class SlotQueryService {
         return now.atZone(HOSPITAL_ZONE).toLocalDate();
     }
 
-    public static LocalDate patientWindowEnd(LocalDate today) {
-        return today.plusDays(PATIENT_WINDOW_DAYS - 1);
+    public HospitalRules.Rules rules() { return rules.active(); }
+
+    public LocalDate patientWindowEnd(LocalDate today) {
+        return rules().patientEnd(today);
     }
 
     /** Only what the caller asked for: an exact match or nothing. */
@@ -77,6 +76,7 @@ public class SlotQueryService {
         LocalDate from = today();
         LocalDate until = patientWindowEnd(from);
         List<Object> params = new ArrayList<>();
+        if (!rules.bookingEnabled()) return new PortalPage(List.of(), from, until, 1, 0, 0);
         String source = matchingSlots(criteria, from, until, null, params);
         int total = jdbc.queryForObject("SELECT COUNT(*) " + source, Integer.class, params.toArray());
         int size = criteria.limit();
@@ -147,6 +147,7 @@ public class SlotQueryService {
     }
 
     private List<AvailableSlot> query(SlotCriteria criteria, LocalDate from, LocalDate until, Long slotId) {
+        if (!rules.bookingEnabled()) return List.of();
         List<Object> params = new ArrayList<>();
         String source = matchingSlots(criteria, from, until, slotId, params);
         return fetch(source, params, Math.min(Math.max(criteria.limit(), 1), MAX_LIMIT), 0);
@@ -208,6 +209,7 @@ public class SlotQueryService {
                        dr.title AS doctor_title, ds.schedule_date, ds.clinic_period,
                        s.start_at, s.end_at
                 """;
+        var policy = rules();
         params.add(limit);
         params.add(offset);
         return jdbc.query(select + source + " ORDER BY ds.schedule_date, s.start_at, dr.id, s.slot_no, s.id LIMIT ? OFFSET ?", (result, rowNum) -> new AvailableSlot(
@@ -220,7 +222,8 @@ public class SlotQueryService {
                 result.getString("doctor_title"),
                 result.getDate("schedule_date").toLocalDate(),
                 result.getString("clinic_period"),
-                formatTime(result.getTimestamp("start_at")) + "-" + formatTime(result.getTimestamp("end_at"))),
+                formatTime(result.getTimestamp("start_at")) + "-" + formatTime(result.getTimestamp("end_at")),
+                policy.cancelBefore(result.getDate("schedule_date").toLocalDate())),
                 params.toArray());
     }
 

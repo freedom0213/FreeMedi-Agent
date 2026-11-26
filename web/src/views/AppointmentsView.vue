@@ -3,17 +3,21 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, ArrowRight, CalendarDays, ChevronRight, CircleHelp, ClipboardList, Copy, LoaderCircle, RefreshCw } from 'lucide-vue-next'
 import AppShell from '../components/AppShell.vue'
+import AppointmentNotifications from '../components/AppointmentNotifications.vue'
 import PaginationBar from '../components/PaginationBar.vue'
 import consultationArt from '../assets/home-consultation.webp'
 import { patientSession } from '../api/auth'
 import { errorMessage } from '../api/http'
-import { cancelAppointment, channelLabel, formatAppointmentDate, formatHospitalDateTime, getAppointment, readAppointmentOverview } from '../api/portal'
+import { cancelAppointment, channelLabel, formatAppointmentDate, formatHospitalDateTime, getAppointment, markAppointmentNoticeRead,
+  readAppointmentOverview, visitOutcomeConfirmed, visitOutcomeLabel } from '../api/portal'
 import { readPending, rescheduleSubmissionKey } from '../stores/pending'
 import type { AppointmentOverview, AppointmentRecord } from '../types/portal'
 
 const route = useRoute()
 const router = useRouter()
 const requested = computed(() => typeof route.query.appointmentNo === 'string' ? route.query.appointmentNo : '')
+const noticeKind = computed(() => route.query.notice === 'STOPPED' || route.query.notice === 'ARRANGEMENT'
+  ? route.query.notice : undefined)
 const overview = ref<AppointmentOverview>()
 const upcomingPage = computed(() => readPage(route.query.upcomingPage))
 const historyPage = computed(() => readPage(route.query.historyPage))
@@ -27,6 +31,8 @@ const pendingReschedule = computed(() => {
 })
 const loading = ref(true)
 const error = ref('')
+const noticeNotRead = ref(false)
+const noticeRefresh = ref(0)
 const copyStatus = ref('')
 const cancelAsk = ref(false)
 const cancelBusy = ref(false)
@@ -47,7 +53,7 @@ const pageQuery = computed(() => ({
   historyPage: historyPage.value > 1 ? historyPage.value : undefined,
 }))
 
-watch([requested, upcomingPage, historyPage], async ([number, upcoming, history], previous) => {
+watch([requested, upcomingPage, historyPage, noticeKind], async ([number, upcoming, history], previous) => {
   if (number !== previous[0]) {
     cancelAsk.value = false
     changeNotice.value = ''
@@ -71,14 +77,24 @@ function goPage(section: 'upcoming' | 'history', page: number) {
 async function load() {
   const id = ++requestId
   const number = requested.value
+  const kind = noticeKind.value
   loading.value = true
   error.value = ''
+  noticeNotRead.value = false
   copyStatus.value = ''
   selected.value = null
   try {
     if (number) {
       const detail = await getAppointment(number)
-      if (id === requestId) selected.value = detail
+      if (id !== requestId) return
+      selected.value = detail
+      if (kind && detail.interruption && (kind === 'STOPPED' || detail.interruption.outcome)) {
+        try {
+          await markAppointmentNoticeRead(detail.appointmentNo, kind)
+        } catch {
+          if (id === requestId) noticeNotRead.value = true
+        }
+      }
     } else {
       const result = await readAppointmentOverview(upcomingPage.value, historyPage.value)
       if (id === requestId) overview.value = result
@@ -88,6 +104,11 @@ async function load() {
   } finally {
     if (id === requestId) loading.value = false
   }
+}
+
+function refresh() {
+  noticeRefresh.value++
+  void load()
 }
 
 function shortWeekday(date: string) {
@@ -140,9 +161,11 @@ async function confirmCancel() {
   }
 }
 
-function statusLabel(status: string): string {
-  return ({ BOOKED: '已预约', CHECKED_IN: '已签到', CANCELLED: '已取消', EXPIRED: '已过期',
-    RESCHEDULED: '已改约' } as Record<string, string>)[status] ?? status
+function statusLabel(appointment: AppointmentRecord): string {
+  return visitOutcomeLabel(appointment) ?? ({
+    BOOKED: '已预约', CHECKED_IN: '已签到', CANCELLED: '已取消', EXPIRED: '已过期',
+    RESCHEDULED: '已改约', INTERRUPTED: '已停诊',
+  } as Record<string, string>)[appointment.status] ?? appointment.status
 }
 </script>
 
@@ -154,11 +177,16 @@ function statusLabel(status: string): string {
       </RouterLink>
       <header class="appointments-header">
         <h1 ref="heading" tabindex="-1">{{ requested ? '预约详情' : '我的预约' }}</h1>
-        <button v-if="!requested && !error" class="button-secondary" type="button" :disabled="loading" @click="load">
+        <button v-if="!requested && !error" class="button-secondary" type="button" :disabled="loading" @click="refresh">
           <RefreshCw :size="15" aria-hidden="true" /> 刷新记录
         </button>
       </header>
 
+      <AppointmentNotifications v-if="!requested" :refresh-key="noticeRefresh" />
+      <div v-if="noticeNotRead" class="appointments-notice appointments-error" role="alert">
+        <p>预约已打开，通知暂未标记为已读。</p>
+        <button class="button-secondary" type="button" @click="load">重试</button>
+      </div>
       <p v-if="loading" class="appointments-notice" role="status">
         <LoaderCircle :size="17" class="spin" aria-hidden="true" />正在读取{{ requested ? '预约详情' : '预约记录' }}…
       </p>
@@ -175,7 +203,7 @@ function statusLabel(status: string): string {
               <time :datetime="selected.appointmentDate">{{ formatAppointmentDate(selected.appointmentDate) }}</time>
               <p class="appointment-time">{{ selected.timeRange }}</p>
             </div>
-            <span class="appointment-status" :data-status="selected.status">{{ statusLabel(selected.status) }}</span>
+            <span class="appointment-status" :data-status="selected.status">{{ statusLabel(selected) }}</span>
           </header>
           <dl class="appointment-metadata">
             <div><dt>科室</dt><dd>{{ selected.departmentName }}</dd></div>
@@ -185,6 +213,12 @@ function statusLabel(status: string): string {
             </div>
             <div><dt>预约方式</dt><dd>{{ channelLabel(selected.bookedVia) }}</dd></div>
             <div v-if="selected.checkedInAt"><dt>签到时间</dt><dd>{{ formatHospitalDateTime(selected.checkedInAt) }}</dd></div>
+            <div v-if="selected.visitProgress?.completedAt && visitOutcomeConfirmed(selected)">
+              <dt>就诊登记时间</dt><dd>{{ formatHospitalDateTime(selected.visitProgress.completedAt) }}</dd>
+            </div>
+            <div v-if="selected.visitProgress?.reviewedAt">
+              <dt>复核时间</dt><dd>{{ formatHospitalDateTime(selected.visitProgress.reviewedAt) }}</dd>
+            </div>
             <div v-if="selected.cancelledAt"><dt>取消时间</dt><dd>{{ formatHospitalDateTime(selected.cancelledAt) }}</dd></div>
             <div v-if="selected.originalAppointmentNo"><dt>改约来源</dt>
               <dd><RouterLink :to="appointmentDetail(selected.originalAppointmentNo)">查看改约前的预约</RouterLink></dd>
@@ -204,16 +238,33 @@ function statusLabel(status: string): string {
         <aside class="appointment-support" aria-labelledby="appointment-support-title">
           <img :src="consultationArt" alt="" width="1536" height="1024" />
           <div class="appointment-support-copy">
-            <h2 id="appointment-support-title">{{ selected.status === 'RESCHEDULED' ? '改约结果'
-              : selected.status === 'CHECKED_IN' ? '到院签到' : selected.status === 'BOOKED' ? '就诊准备' : '再次预约' }}</h2>
-            <template v-if="selected.status === 'BOOKED'">
+            <h2 id="appointment-support-title">{{ selected.interruption ? '停诊与后续安排' : selected.status === 'RESCHEDULED' ? '改约结果'
+              : selected.status === 'CHECKED_IN' || visitOutcomeLabel(selected) ? '就诊进度'
+              : selected.status === 'BOOKED' ? '就诊准备' : '再次预约' }}</h2>
+            <template v-if="selected.interruption">
+              <p>{{ selected.interruption.reason }}</p>
+              <p v-if="selected.interruption.arrangement">{{ selected.interruption.arrangement }}</p>
+              <p v-else>待院方安排。请留意本页更新。</p>
+              <RouterLink v-if="selected.interruption.outcome === 'REBOOK'" class="button-primary"
+                :to="{ name: 'booking', query: { departmentId: selected.departmentId } }">
+                按原科室重新挂号 <ArrowRight :size="16" aria-hidden="true" />
+              </RouterLink>
+            </template>
+            <template v-else-if="selected.status === 'BOOKED'">
               <p>到院后请出示预约凭证，由门诊分诊台办理签到。其他准备事项可在下方咨询。</p>
               <RouterLink class="button-primary" :to="preparationRoute(selected, 'detail')">
                 就诊准备 <ArrowRight :size="16" aria-hidden="true" />
               </RouterLink>
             </template>
             <template v-else-if="selected.status === 'CHECKED_IN'">
-              <p>已签到，请在诊区候诊。如需处理预约，请联系分诊台。</p>
+              <p v-if="selected.appointmentEndsAt && Date.parse(selected.appointmentEndsAt) <= Date.now()">已签到，院方尚未登记就诊结果。</p>
+              <p v-else>已签到，请在诊区候诊。如需处理预约，请联系分诊台。</p>
+            </template>
+            <template v-else-if="visitOutcomeLabel(selected)">
+              <p v-if="selected.visitProgress?.reviewedOutcome === 'UNCONFIRMED'">院方正在核实本次就诊结果。</p>
+              <p v-else-if="visitOutcomeConfirmed(selected)">{{ selected.visitProgress?.reviewedOutcome === 'CONFIRMED'
+                ? '院方已复核确认本次就诊。' : '本次就诊已完成。' }}</p>
+              <p v-else>本次预约已结束，院方尚未确认就诊结果。</p>
             </template>
             <template v-else-if="selected.replacementAppointmentNo">
               <p>这笔预约已改约，请查看新的就诊时间和预约凭证。</p>
@@ -263,6 +314,15 @@ function statusLabel(status: string): string {
 
       <div v-else-if="overview && recordCount" class="appointment-columns">
         <div class="appointment-list">
+          <section v-if="overview.interrupted?.length" class="appointment-management" aria-labelledby="interruption-title">
+            <h2 id="interruption-title">停诊提醒</h2>
+            <ul>
+              <li v-for="record in overview.interrupted" :key="record.appointmentNo">
+                <RouterLink :to="detailRoute(record)">{{ formatAppointmentDate(record.appointmentDate) }} {{ record.timeRange }}
+                  · {{ record.departmentName }} · {{ record.doctorName }}。查看停诊安排</RouterLink>
+              </li>
+            </ul>
+          </section>
           <section v-if="overview.next" aria-labelledby="next-appointment-title">
             <h2 id="next-appointment-title">下一次就诊</h2>
             <div class="next-appointment">
@@ -276,7 +336,10 @@ function statusLabel(status: string): string {
                 <p class="next-appointment-doctor">{{ overview.next.departmentName }} · {{ overview.next.doctorName }}<template
                   v-if="overview.next.doctorTitle"> · {{ overview.next.doctorTitle }}</template>
                 </p>
-                <span class="appointment-status" :data-status="overview.next.status">{{ statusLabel(overview.next.status) }}</span>
+                <span class="appointment-status" :data-status="overview.next.status">{{ statusLabel(overview.next) }}</span>
+                <small v-if="overview.next.status === 'CHECKED_IN' && overview.next.checkedInAt">
+                  签到 {{ formatHospitalDateTime(overview.next.checkedInAt) }}
+                </small>
               </div>
               <div class="next-appointment-actions">
                 <RouterLink v-if="overview.next.status === 'BOOKED'" class="button-primary" :to="preparationRoute(overview.next, 'list')">
@@ -307,7 +370,7 @@ function statusLabel(status: string): string {
                     <span>{{ record.departmentName }} · {{ record.doctorName }}<template
                       v-if="record.doctorTitle"> · {{ record.doctorTitle }}</template></span>
                   </span>
-                  <span class="appointment-status" :data-status="record.status">{{ statusLabel(record.status) }}</span>
+                  <span class="appointment-status" :data-status="record.status">{{ statusLabel(record) }}</span>
                   <ChevronRight :size="16" class="appointment-row-arrow" aria-hidden="true" />
                 </RouterLink>
               </li>

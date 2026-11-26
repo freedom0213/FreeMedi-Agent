@@ -109,11 +109,12 @@ public final class MySqlReadToolExecutor implements ReadToolExecutor {
     }
 
     private Map<String, Object> rules() {
+        var policy = slotQuery.rules();
         return Map.of(
-                "advanceBookingDays", SlotQueryService.PATIENT_WINDOW_DAYS,
+                "advanceBookingDays", policy.patientDays(),
                 "cancelSupported", true,
-                "cancelOnlinePolicy", "就诊前一天北京时间 " + AppointmentTiming.CANCELLATION_CUTOFF + " 前，且尚未签到，可在我的预约详情确认取消。",
-                "checkInPolicy", "到院后由分诊台在预约开始前 " + AppointmentTiming.CHECK_IN_LEAD_MINUTES + " 分钟至时段结束前签到。",
+                "cancelOnlinePolicy", "就诊前一天北京时间 " + policy.cancellationCutoff() + " 前，且尚未签到，可在我的预约详情确认取消。",
+                "checkInPolicy", "到院后由分诊台在预约开始前 " + policy.checkInLead() + " 分钟至时段结束前签到。",
                 "rescheduleSupported", true,
                 "rescheduleOnlinePolicy", "仅可在我的预约详情发起改约，与取消共用截止时间，只能更换同科室同医生的时段。新号源确认成功后才更换原预约。",
                 "confirmationRequired", true,

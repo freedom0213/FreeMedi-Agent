@@ -697,7 +697,7 @@ public final class AgentRuntimeService implements AgentRuntime {
     }
 
     private static boolean closedAppointment(String code) {
-        return "APPOINTMENT_CANCELLED".equals(code) || "APPOINTMENT_RESCHEDULED".equals(code);
+        return "APPOINTMENT_CANCELLED".equals(code) || "APPOINTMENT_RESCHEDULED".equals(code) || "APPOINTMENT_INTERRUPTED".equals(code);
     }
 
     private ConfirmationResult closedAppointmentConfirmation(TaskContext context, String appointmentNo, String code, String message) {

@@ -3,6 +3,8 @@ import { onMounted, ref } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import { ArrowRight, Brain, CalendarCheck, ChevronRight, Heart, LoaderCircle, Stethoscope } from 'lucide-vue-next'
 import AppShell from '../components/AppShell.vue'
+import AppointmentNotifications from '../components/AppointmentNotifications.vue'
+import { patientSession } from '../api/auth'
 import { listDepartments } from '../api/portal'
 import consultationImage from '../assets/home-consultation.webp'
 import lungsIcon from '../assets/department-lungs.png'
@@ -51,6 +53,7 @@ function beginGuide() {
 <template>
   <AppShell class="home-frame">
     <div class="home-page page-wrap">
+      <AppointmentNotifications v-if="patientSession" compact />
       <section class="home-hero" aria-labelledby="home-title">
         <div class="home-intro">
           <h1 id="home-title">找到科室，<br />约好就诊时间。</h1>
