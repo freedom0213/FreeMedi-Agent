@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mediflow.agent.mapper.knowledge.KnowledgeMapper">
+    <select id="countChunksByDocument" resultType="com.mediflow.agent.mapper.knowledge.KnowledgeMapper$ChunkCount" flushCache="true">
+        SELECT c.document_id, c.embedding_status, COUNT(*) AS chunk_count
+        FROM knowledge_chunk c
+        JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+        GROUP BY c.document_id, c.embedding_status
+    </select>
+
+    <select id="libraryGroups" resultType="com.mediflow.agent.mapper.knowledge.KnowledgeMapper$LibraryGroup" flushCache="true">
+        SELECT d.doc_type, COUNT(DISTINCT d.doc_no) AS documents, COUNT(*) AS versions,
+               SUM(d.status = 'PUBLISHED') AS published, SUM(d.status = 'DRAFT') AS drafts,
+               SUM(d.status = 'ARCHIVED') AS archived,
+               COALESCE(SUM(CASE WHEN d.status = 'PUBLISHED' THEN c.indexed END), 0) AS indexed,
+               COALESCE(SUM(CASE WHEN d.status = 'PUBLISHED' THEN c.pending END), 0) AS pending,
+               COALESCE(SUM(CASE WHEN d.status = 'PUBLISHED' THEN c.failed END), 0) AS failed
+        FROM knowledge_document d
+        LEFT JOIN (
+            SELECT document_id, version, SUM(embedding_status = 'INDEXED') AS indexed,
+                   SUM(embedding_status = 'PENDING') AS pending, SUM(embedding_status = 'FAILED') AS failed
+            FROM knowledge_chunk GROUP BY document_id, version
+        ) c ON c.document_id = d.id AND c.version = d.version
+        GROUP BY d.doc_type ORDER BY d.doc_type
+    </select>
+
+    <sql id="adminChunkSource">
+        FROM knowledge_chunk c JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+        <where>
+            <if test="filters.type != null">AND d.doc_type = #{filters.type}</if>
+            <if test="filters.status != null">AND d.status = #{filters.status}</if>
+            <if test="filters.embedding != null">AND c.embedding_status = #{filters.embedding}</if>
+            <if test="filters.pattern != null">
+                AND (d.doc_no LIKE #{filters.pattern} ESCAPE '!' OR d.title LIKE #{filters.pattern} ESCAPE '!'
+                    OR c.heading LIKE #{filters.pattern} ESCAPE '!' OR c.content LIKE #{filters.pattern} ESCAPE '!')
+            </if>
+        </where>
+    </sql>
+
+    <select id="countAdminChunks" resultType="long" flushCache="true">
+        SELECT COUNT(*)
+        <include refid="adminChunkSource"/>
+    </select>
+
+    <select id="adminChunks" resultType="com.mediflow.agent.mapper.knowledge.KnowledgeMapper$AdminChunk" flushCache="true">
+        SELECT c.id, c.chunk_no, c.heading, c.content, c.char_count, c.embedding_status, c.index_error, c.indexed_at,
+               d.doc_no, d.title, d.version, d.doc_type, d.source, d.status
+        <include refid="adminChunkSource"/>
+        ORDER BY d.doc_no, d.version DESC, c.chunk_no LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <update id="updatePublishedIndex">
+        UPDATE knowledge_chunk c JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+        SET c.embedding_status = #{status}, c.indexed_at = #{indexedAt,jdbcType=TIMESTAMP}, c.index_error = #{error,jdbcType=VARCHAR}
+        WHERE c.id = #{chunkId} AND d.status = 'PUBLISHED'
+    </update>
+
+    <select id="findChunksPendingIndex" resultType="com.mediflow.agent.mapper.knowledge.KnowledgeMapper$PendingChunk" flushCache="true">
+        SELECT c.id, c.document_id, c.version, c.heading, c.content,
+               d.doc_type, d.department_id, d.doctor_id
+        FROM knowledge_chunk c
+        JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+        WHERE c.embedding_status &lt;&gt; 'INDEXED' AND d.status = 'PUBLISHED'
+        ORDER BY c.id
+        LIMIT #{limit}
+    </select>
+
+    <select id="nextDraftChunk" resultType="com.mediflow.agent.mapper.knowledge.KnowledgeMapper$PendingChunk" flushCache="true">
+        SELECT c.id, c.document_id, c.version, c.heading, c.content,
+               d.doc_type, d.department_id, d.doctor_id
+        FROM knowledge_chunk c
+        JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+        WHERE d.id = #{documentId} AND d.version = #{version} AND d.status = 'DRAFT' AND c.embedding_status &lt;&gt; 'INDEXED'
+        ORDER BY c.chunk_no LIMIT 1
+    </select>
+
+    <update id="resetMissingDraftChunks">
+        UPDATE knowledge_chunk c
+        JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+        SET c.embedding_status = 'PENDING', c.index_error = NULL, c.indexed_at = NULL
+        WHERE d.id = #{documentId} AND d.status = 'DRAFT' AND c.id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </update>
+
+    <update id="markDraftIndexFailed">
+        UPDATE knowledge_chunk c
+        JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+        SET c.embedding_status = 'FAILED', c.index_error = #{error}
+        WHERE c.id = #{chunkId} AND d.status = 'DRAFT' AND c.embedding_status &lt;&gt; 'INDEXED'
+    </update>
+
+    <select id="findChunkViews" resultType="com.mediflow.agent.mapper.knowledge.KnowledgeMapper$ChunkView" flushCache="true">
+        SELECT c.id AS chunk_id, c.document_id, c.version, c.chunk_no, c.heading, c.content,
+               d.doc_no, d.title, d.doc_type, d.source, d.published_at,
+               d.status, d.department_id, d.doctor_id, c.embedding_status
+        FROM knowledge_chunk c
+        JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+        WHERE c.id IN
+        <foreach collection="chunkIds" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </select>
+
+    <update id="markIndexed">
+        UPDATE knowledge_chunk
+        SET embedding_status = 'INDEXED', index_error = NULL, indexed_at = #{indexedAt}
+        WHERE id IN
+        <foreach collection="chunkIds" item="id" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </update>
+
+    <update id="resetPublishedChunksToPending">
+        UPDATE knowledge_chunk c
+        JOIN knowledge_document d ON d.id = c.document_id AND d.version = c.version
+        SET c.embedding_status = 'PENDING', c.indexed_at = NULL, c.index_error = NULL
+        WHERE d.status = 'PUBLISHED'
+    </update>
+</mapper>

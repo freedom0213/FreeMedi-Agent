@@ -1,19 +1,20 @@
 package com.mediflow.agent.config;
 
+import com.mediflow.agent.agent.settings.AgentSettings;
 import java.time.Clock;
 import java.util.List;
 
-import com.mediflow.agent.agent.AgentRuntime;
-import com.mediflow.agent.agent.AgentRuntimeService;
-import com.mediflow.agent.agent.AgentCallPolicy;
-import com.mediflow.agent.agent.AppointmentApplicationService;
-import com.mediflow.agent.agent.AppointmentOptions;
-import com.mediflow.agent.agent.CompositeReadToolExecutor;
-import com.mediflow.agent.agent.DepartmentCatalog;
-import com.mediflow.agent.agent.ReadToolExecutor;
-import com.mediflow.agent.agent.TaskStateStore;
-import com.mediflow.agent.appointment.MySqlReadToolExecutor;
-import com.mediflow.agent.knowledge.KnowledgeReadToolExecutor;
+import com.mediflow.agent.agent.runtime.AgentRuntime;
+import com.mediflow.agent.agent.runtime.AgentRuntimeService;
+import com.mediflow.agent.agent.runtime.AgentCallPolicy;
+import com.mediflow.agent.agent.booking.AppointmentApplicationService;
+import com.mediflow.agent.agent.booking.AppointmentOptions;
+import com.mediflow.agent.agent.tool.CompositeReadToolExecutor;
+import com.mediflow.agent.agent.booking.DepartmentCatalog;
+import com.mediflow.agent.agent.tool.ReadToolExecutor;
+import com.mediflow.agent.agent.persistence.TaskStateStore;
+import com.mediflow.agent.agent.tool.MySqlReadToolExecutor;
+import com.mediflow.agent.knowledge.search.KnowledgeReadToolExecutor;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mediflow.agent.mapper.admin.agent.AgentPromptMapper">
+    <sql id="versionWithAuthor">
+        SELECT p.id, p.triage_guidance, p.selection_guidance, p.note, u.display_name, p.created_at,
+               p.trial_fingerprint, p.trial_passed, p.trial_report, p.tested_at
+        FROM agent_prompt_revision p JOIN sys_user u ON u.id = p.created_by
+    </sql>
+
+    <select id="selection" resultType="com.mediflow.agent.mapper.admin.agent.AgentPromptMapper$Selection" flushCache="true">
+        SELECT s.revision, s.active_revision_id, s.activated_at, p.triage_guidance, p.selection_guidance
+        FROM agent_prompt_settings s LEFT JOIN agent_prompt_revision p ON s.active_revision_id = p.id
+        WHERE s.id = 1
+    </select>
+
+    <select id="versions" resultType="com.mediflow.agent.mapper.admin.agent.AgentPromptMapper$Version" flushCache="true">
+        <include refid="versionWithAuthor"/>
+        ORDER BY p.id DESC
+    </select>
+
+    <select id="version" resultType="com.mediflow.agent.mapper.admin.agent.AgentPromptMapper$Version" flushCache="true">
+        <include refid="versionWithAuthor"/>
+        WHERE p.id = #{id}
+    </select>
+</mapper>

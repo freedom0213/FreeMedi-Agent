@@ -1,5 +1,32 @@
 package com.mediflow.agent.agent.persistence;
 
+import com.mediflow.agent.agent.booking.AppointmentApplicationService;
+import com.mediflow.agent.agent.booking.AppointmentExecutionResult;
+import com.mediflow.agent.agent.booking.AppointmentPlan;
+import com.mediflow.agent.agent.booking.AppointmentVerificationResult;
+import com.mediflow.agent.agent.booking.DepartmentCatalog;
+import com.mediflow.agent.agent.booking.InMemoryAppointmentApplicationService;
+import com.mediflow.agent.agent.booking.PlanDraft;
+import com.mediflow.agent.agent.booking.PlanId;
+import com.mediflow.agent.agent.booking.PlanStatus;
+import com.mediflow.agent.agent.model.AgentDecision;
+import com.mediflow.agent.agent.model.DecisionModel;
+import com.mediflow.agent.agent.runtime.AgentCallPolicy;
+import com.mediflow.agent.agent.runtime.AgentRuntime;
+import com.mediflow.agent.agent.runtime.AgentRuntimeService;
+import com.mediflow.agent.agent.runtime.AgentTurnResult;
+import com.mediflow.agent.agent.runtime.ConfirmationResult;
+import com.mediflow.agent.agent.runtime.Principal;
+import com.mediflow.agent.agent.task.TaskContext;
+import com.mediflow.agent.agent.task.TaskId;
+import com.mediflow.agent.agent.task.TaskSnapshot;
+import com.mediflow.agent.agent.task.TaskStatus;
+import com.mediflow.agent.agent.task.TriageRecommendation;
+import com.mediflow.agent.agent.tool.InMemoryReadToolExecutor;
+import com.mediflow.agent.agent.tool.ReadToolExecutor;
+import com.mediflow.agent.agent.tool.ReadToolSpec;
+import com.mediflow.agent.agent.tool.ToolCall;
+import com.mediflow.agent.agent.tool.ToolResult;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -36,15 +63,16 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.mediflow.agent.agent.*;
-import com.mediflow.agent.api.MySqlTaskApplicationService;
-import com.mediflow.agent.appointment.AppointmentWriteService;
-import com.mediflow.agent.appointment.MySqlAppointmentApplicationService;
-import com.mediflow.agent.appointment.MySqlHospitalDirectory;
-import com.mediflow.agent.appointment.MySqlReadToolExecutor;
-import com.mediflow.agent.appointment.SlotCriteria;
-import com.mediflow.agent.appointment.SlotQueryService;
-import com.mediflow.agent.appointment.SlotSearch;
+import com.mediflow.agent.service.guide.MySqlTaskApplicationService;
+import com.mediflow.agent.service.appointment.lifecycle.AppointmentWriteService;
+import com.mediflow.agent.agent.booking.MySqlAppointmentApplicationService;
+import com.mediflow.agent.service.appointment.query.MySqlHospitalDirectory;
+import com.mediflow.agent.agent.tool.MySqlReadToolExecutor;
+import com.mediflow.agent.service.appointment.query.SlotCriteria;
+import com.mediflow.agent.mapper.appointment.AppointmentLockMapper;
+import com.mediflow.agent.service.appointment.policy.HospitalRules;
+import com.mediflow.agent.service.appointment.query.SlotQueryService;
+import com.mediflow.agent.service.appointment.query.SlotSearch;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -55,6 +83,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -64,6 +93,7 @@ import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
@@ -85,6 +115,8 @@ class MySqlTaskStateStoreTest {
     @Autowired TaskPersistenceMapper mapper;
     @Autowired ObjectMapper json;
     @Autowired PlatformTransactionManager transactionManager;
+    @Autowired AppointmentLockMapper appointmentLocks;
+    @Autowired HospitalRules hospitalRules;
     @Autowired JdbcTemplate jdbc;
     @Autowired Flyway flyway;
     @Autowired MySqlAppointmentApplicationService appointmentService;
@@ -156,6 +188,38 @@ class MySqlTaskStateStoreTest {
     }
 
     @Test
+    void appointmentMapperRowLocksAreHeldUntilTheSpringTransactionEnds() {
+        long scheduleId = jdbc.queryForObject("SELECT schedule_id FROM appointment_slot WHERE id = ?", Long.class, slotId);
+        var rows = List.of(Map.entry("sys_user", patientId), Map.entry("department", departmentId),
+                Map.entry("doctor", doctorId), Map.entry("doctor_schedule", scheduleId));
+        var transaction = new TransactionTemplate(transactionManager);
+        var contender = new TransactionTemplate(transactionManager);
+        contender.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+
+        transaction.executeWithoutResult(status -> {
+            assertThat(appointmentLocks.lockPatient(patientId)).containsExactly(patientId);
+            assertThat(appointmentLocks.lockDepartment(departmentId)).isEqualTo("ACTIVE");
+            assertThat(appointmentLocks.lockDoctor(departmentId, doctorId)).isEqualTo("ACTIVE");
+            assertThat(appointmentLocks.lockSchedule(doctorId, scheduleId)).isEqualTo("OPEN");
+
+            for (var row : rows) {
+                String sql = "SELECT id FROM " + row.getKey() + " WHERE id = ? FOR UPDATE NOWAIT";
+                assertThatThrownBy(() -> contender.execute(tx -> jdbc.queryForObject(sql, Long.class, row.getValue())))
+                        .isInstanceOfSatisfying(DataAccessException.class, error ->
+                                assertThat(error.getMostSpecificCause()).isInstanceOfSatisfying(java.sql.SQLException.class,
+                                        cause -> assertThat(cause.getErrorCode()).isEqualTo(3572)));
+            }
+        });
+
+        contender.executeWithoutResult(status -> {
+            for (var row : rows) {
+                String sql = "SELECT id FROM " + row.getKey() + " WHERE id = ? FOR UPDATE NOWAIT";
+                assertThat(jdbc.queryForObject(sql, Long.class, row.getValue())).isEqualTo(row.getValue());
+            }
+        });
+    }
+
+    @Test
     void migrationsCanBeValidatedAndReappliedWithoutChanges() {
         flyway.validate();
         // Derived from the migration resources so adding a migration cannot silently pass here.
@@ -196,11 +260,13 @@ class MySqlTaskStateStoreTest {
         var booked = appointmentWriteService.book(AppointmentWriteService.BookingCommand.forSlot(
                 new AppointmentWriteService.Actor(patientId, "PATIENT"), "cutoff-fixture", slotId));
         var deadline = FIXTURE_DATE.minusDays(1).atTime(23, 0).atZone(ZoneId.of("Asia/Shanghai")).toInstant();
-        var atDeadline = new AppointmentWriteService(jdbc.getDataSource(), transactionManager, Clock.fixed(deadline, ZoneOffset.UTC));
+        var atDeadline = new AppointmentWriteService(jdbc.getDataSource(), transactionManager,
+                Clock.fixed(deadline, ZoneOffset.UTC), hospitalRules, appointmentLocks);
         assertThat(atDeadline.cancel(booked.appointmentNo(), patientId).code()).isEqualTo("CANCEL_CUTOFF_PASSED");
         assertThat(jdbc.queryForObject("SELECT status FROM appointment_slot WHERE id = ?", String.class, slotId))
                 .isEqualTo("RESERVED");
-        var before = new AppointmentWriteService(jdbc.getDataSource(), transactionManager, Clock.fixed(deadline.minusMillis(1), ZoneOffset.UTC));
+        var before = new AppointmentWriteService(jdbc.getDataSource(), transactionManager,
+                Clock.fixed(deadline.minusMillis(1), ZoneOffset.UTC), hospitalRules, appointmentLocks);
         assertThat(before.cancel(booked.appointmentNo(), patientId).success()).isTrue();
         assertThat(jdbc.queryForObject("SELECT status FROM appointment_slot WHERE id = ?", String.class, slotId))
                 .isEqualTo("AVAILABLE");
@@ -359,6 +425,37 @@ class MySqlTaskStateStoreTest {
         } finally {
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    void guideHistoryPaginatesSessionsAndOnlyReturnsTheAuthenticatedPatientsTasks() throws Exception {
+        // setUp already created the oldest task for this patient.
+        for (int i = 1; i < 20; i++) {
+            taskApplication.createTask(principal, "导诊会话 " + i);
+        }
+        var newest = taskApplication.createTask(principal, "最新的导诊会话");
+
+        var owner = login(fixtureUsername, DEMO_A_PASSWORD);
+        var firstPage = mockMvc.perform(get("/api/v1/tasks").session(owner))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(20))
+                .andExpect(jsonPath("$.items[0].taskId").value(newest.value()))
+                .andExpect(jsonPath("$.items[0].title").value("最新的导诊会话"))
+                .andExpect(jsonPath("$.nextCursor").isNumber())
+                .andReturn();
+        String before = json.readTree(firstPage.getResponse().getContentAsString()).get("nextCursor").asText();
+        mockMvc.perform(get("/api/v1/tasks").param("before", before).session(owner))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.items.length()").value(1))
+                .andExpect(jsonPath("$.items[0].taskId").value(taskId.value()))
+                .andExpect(jsonPath("$.items[0].title").value(fixtureUsername))
+                .andExpect(jsonPath("$.nextCursor").doesNotExist());
+
+        var other = login("demo-patient-b", DEMO_B_PASSWORD);
+        mockMvc.perform(get("/api/v1/tasks").session(other))
+                .andExpect(status().isOk())
+                .andExpect(result -> assertThat(result.getResponse().getContentAsString())
+                        .doesNotContain(newest.value(), taskId.value()));
     }
 
     @Test
@@ -709,6 +806,27 @@ class MySqlTaskStateStoreTest {
         assertThat(directory.listActiveDoctors(departmentId))
                 .anyMatch(view -> doctorName.equals(view.name()))
                 .noneMatch(view -> view.name().startsWith("停用医生-"));
+    }
+
+    @Test
+    void directoryQueriesReflectStatusChangesWithinTheSameTransaction() {
+        new TransactionTemplate(transactionManager).executeWithoutResult(transaction -> {
+            String code = jdbc.queryForObject("SELECT code FROM department WHERE id = ?", String.class, departmentId);
+            assertThat(directory.findActiveDepartmentId(code)).isEqualTo(departmentId);
+            assertThat(directory.findActiveDepartmentIdMentionedIn("请查" + departmentName)).isEqualTo(departmentId);
+
+            String question = "请查" + doctorName;
+            assertThat(directory.findActiveClinicianMentionedIn(question)).hasValueSatisfying(clinician -> {
+                assertThat(clinician.id()).isEqualTo(doctorId);
+                assertThat(clinician.departmentId()).isEqualTo(departmentId);
+            });
+            assertThat(directory.isActiveDoctorInDepartment(doctorId, departmentId)).isTrue();
+
+            jdbc.update("UPDATE doctor SET status = 'DISABLED' WHERE id = ?", doctorId);
+            assertThat(directory.findActiveClinicianMentionedIn(question)).isEmpty();
+            assertThat(directory.isActiveDoctorInDepartment(doctorId, departmentId)).isFalse();
+            transaction.setRollbackOnly();
+        });
     }
 
     @Test
@@ -1370,13 +1488,16 @@ class MySqlTaskStateStoreTest {
                 .andExpect(jsonPath("$.status").value("AWAITING_CONFIRMATION"));
         AppointmentPlan selected = runtime.getTask(taskId, principal).activePlan().orElseThrow();
 
-        for (String message : List.of("就诊要准备什么材料？", "好的", "请查号")) {
-            mockMvc.perform(postAs(session, "/api/v1/tasks/{taskId}/messages", id)
+        for (String message : List.of("就诊要准备什么材料？", "好的，就按这个方案。", "请查号")) {
+            var response = mockMvc.perform(postAs(session, "/api/v1/tasks/{taskId}/messages", id)
                             .contentType(MediaType.APPLICATION_JSON)
                             .content(json.writeValueAsString(Map.of("message", message))))
                     .andExpect(status().isOk())
                     .andExpect(jsonPath("$.status").value("AWAITING_CONFIRMATION"))
                     .andExpect(jsonPath("$.task.activePlan.version").value(selected.version()));
+            if (message.startsWith("好的")) {
+                response.andExpect(jsonPath("$.message").value("已选好号源。请核对确认单上的医生和时间，再点击「确认预约」。"));
+            }
         }
         mockMvc.perform(get("/api/v1/tasks/{taskId}", id).session(session))
                 .andExpect(status().isOk())
@@ -1396,6 +1517,25 @@ class MySqlTaskStateStoreTest {
                         .content(json.writeValueAsString(Map.of("planId", selected.id().value(),
                                 "planVersion", selected.version(), "idempotencyKey", "stale-s2"))))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.success").value(false));
+    }
+
+    @Test
+    void clearingTheRequestedDoctorExplainsSameDepartmentAlternatives() {
+        jdbc.update("INSERT INTO doctor(department_id, name, status) VALUES (?, '无号测试医生', 'ACTIVE')", departmentId);
+        long unavailable = jdbc.queryForObject(
+                "SELECT id FROM doctor WHERE department_id=? AND name='无号测试医生'", Long.class, departmentId);
+
+        var strict = runtime.updateRequirements(taskId, principal, Map.of("departmentId", departmentId,
+                "doctorId", unavailable, "appointmentDate", FIXTURE_DAY, "clinicPeriod", "AFTERNOON"));
+        assertThat(strict.status()).isEqualTo(TaskStatus.NEED_MORE_INFO);
+
+        var relaxed = runtime.updateRequirements(taskId, principal, Map.of("doctorName", ""));
+        var batch = json.valueToTree(relaxed.task().facts().get("candidateBatch"));
+        assertThat(batch.at("/slots/0/doctorId").asLong()).isEqualTo(doctorId);
+        assertThat(batch.at("/slots/0/appointmentDate").asText()).isEqualTo(FIXTURE_DAY);
+        assertThat(batch.at("/slots/0/clinicPeriod").asText()).isEqualTo("AFTERNOON");
+        assertThat(batch.at("/slots/0/differences/0").asText()).isEqualTo("备选医生");
+        assertThat(relaxed.message()).contains("无号测试医生");
     }
 
     @Test

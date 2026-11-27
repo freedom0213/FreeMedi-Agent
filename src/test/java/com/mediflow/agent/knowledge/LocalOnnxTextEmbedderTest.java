@@ -1,5 +1,7 @@
 package com.mediflow.agent.knowledge;
 
+import com.mediflow.agent.knowledge.embedding.LocalOnnxTextEmbedder;
+import com.mediflow.agent.knowledge.embedding.TextEmbedder;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;

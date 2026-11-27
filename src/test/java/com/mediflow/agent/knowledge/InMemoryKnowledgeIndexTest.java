@@ -1,5 +1,12 @@
 package com.mediflow.agent.knowledge;
 
+import com.mediflow.agent.knowledge.document.KnowledgeDocType;
+import com.mediflow.agent.knowledge.document.KnowledgeStatus;
+import com.mediflow.agent.knowledge.index.DisabledKnowledgeIndex;
+import com.mediflow.agent.knowledge.index.InMemoryKnowledgeIndex;
+import com.mediflow.agent.knowledge.index.KnowledgeIndexFilter;
+import com.mediflow.agent.knowledge.index.KnowledgeIndexHit;
+import com.mediflow.agent.knowledge.index.KnowledgeIndexPoint;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -7,7 +14,7 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
-import com.mediflow.agent.knowledge.KnowledgeChunk.EmbeddingStatus;
+import com.mediflow.agent.knowledge.document.KnowledgeChunk.EmbeddingStatus;
 
 class InMemoryKnowledgeIndexTest {
 

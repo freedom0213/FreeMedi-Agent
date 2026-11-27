@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mediflow.agent.mapper.appointment.AppointmentNotificationMapper">
+    <sql id="notices">
+        FROM appointment a
+        JOIN interrupted_appointment i ON i.appointment_id = a.id
+        JOIN schedule_interruption sc ON sc.schedule_id = i.schedule_id
+        JOIN (
+        SELECT 'STOPPED' AS kind
+        UNION ALL SELECT 'ARRANGEMENT'
+        ) event ON event.kind = 'STOPPED' OR i.arranged_at IS NOT NULL
+        LEFT JOIN appointment_notice_receipt r ON r.appointment_id = a.id AND r.notice_kind = event.kind
+    </sql>
+
+    <select id="count" resultType="com.mediflow.agent.mapper.appointment.AppointmentNotificationMapper$Counts" flushCache="true">
+        SELECT COUNT(*) AS total, COUNT(*) - COUNT(r.read_at) AS unread
+        <include refid="notices"/>
+        WHERE a.patient_id = #{patientId}
+    </select>
+
+    <select id="list" resultType="com.mediflow.agent.mapper.appointment.AppointmentNotificationMapper$NoticeRow" flushCache="true">
+        SELECT a.appointment_no, event.kind,
+        CASE WHEN event.kind = 'STOPPED' THEN sc.occurred_at ELSE i.arranged_at END AS occurred_at,
+        sched.schedule_date, d.name AS department_name, dr.name AS doctor_name, r.read_at IS NULL AS unread
+        <include refid="notices"/>
+        JOIN doctor_schedule sched ON sched.id = i.schedule_id
+        JOIN department d ON d.id = a.department_id
+        JOIN doctor dr ON dr.id = a.doctor_id
+        WHERE a.patient_id = #{patientId}
+        ORDER BY unread DESC, occurred_at DESC, a.id DESC, event.kind
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+</mapper>

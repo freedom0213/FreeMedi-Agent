@@ -1,2 +1,2 @@
-/** Agent runtime, task state machine, decision model, and tool orchestration. */
+/** Agent packages for booking contracts, model adapters, persistence, runtime, task state, and read tools. */
 package com.mediflow.agent.agent;

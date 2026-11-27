@@ -1,0 +1,34 @@
+package com.mediflow.agent.agent.task;
+
+import com.mediflow.agent.agent.booking.AppointmentPlan;
+import com.mediflow.agent.agent.tool.ToolResult;
+import java.util.Map;
+import java.util.List;
+import java.util.Optional;
+
+public record TaskSnapshot(
+        TaskId taskId,
+        long patientId,
+        TaskStatus status,
+        int stepCount,
+        int turnCount,
+        Map<String, Object> facts,
+        Optional<AppointmentPlan> activePlan,
+        Optional<ToolResult> lastToolResult,
+        List<TaskTurn> turns,
+        TaskType taskType) {
+
+    public TaskSnapshot(TaskId taskId, long patientId, TaskStatus status, int stepCount, int turnCount,
+                        Map<String, Object> facts, Optional<AppointmentPlan> activePlan,
+                        Optional<ToolResult> lastToolResult, List<TaskTurn> turns) {
+        this(taskId, patientId, status, stepCount, turnCount, facts, activePlan, lastToolResult, turns,
+                TaskType.APPOINTMENT_BOOKING);
+    }
+
+    public TaskSnapshot {
+        facts = facts == null ? Map.of() : Map.copyOf(facts);
+        activePlan = activePlan == null ? Optional.empty() : activePlan;
+        lastToolResult = lastToolResult == null ? Optional.empty() : lastToolResult;
+        turns = turns == null ? List.of() : List.copyOf(turns);
+    }
+}

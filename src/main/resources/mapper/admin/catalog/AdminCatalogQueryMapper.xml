@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mediflow.agent.mapper.admin.catalog.AdminCatalogQueryMapper">
+    <sql id="departmentScope">
+        <choose>
+            <when test="scope.all">1 = 1</when>
+            <when test="scope.departments.isEmpty()">1 = 0</when>
+            <otherwise>
+                dp.id IN
+                <foreach collection="scope.departments" item="departmentId" open="(" separator="," close=")">
+                    #{departmentId}
+                </foreach>
+            </otherwise>
+        </choose>
+    </sql>
+
+    <sql id="departmentsSource">
+        FROM department
+        <where>
+            <if test="q != null">AND (name LIKE CONCAT('%', #{q}, '%') OR code LIKE CONCAT('%', #{q}, '%'))</if>
+            <if test="status != null">AND status = #{status}</if>
+        </where>
+    </sql>
+
+    <sql id="doctorsSource">
+        FROM doctor d JOIN department dp ON dp.id = d.department_id
+        <where>
+            <if test="q != null">AND d.name LIKE CONCAT('%', #{q}, '%')</if>
+            <if test="departmentId != null">AND d.department_id = #{departmentId}</if>
+            <if test="status != null">AND d.status = #{status}</if>
+        </where>
+    </sql>
+
+    <sql id="scheduleSource">
+        FROM doctor_schedule sc JOIN doctor d ON d.id = sc.doctor_id
+        JOIN department dp ON dp.id = d.department_id
+    </sql>
+
+    <sql id="scheduleColumns">
+        SELECT sc.id, dp.id AS department_id, dp.name AS department_name,
+               sc.doctor_id, d.name AS doctor_name, sc.schedule_date, sc.clinic_period, sc.status,
+               (SELECT COUNT(*) FROM appointment_slot s WHERE s.schedule_id = sc.id) AS slots,
+               (SELECT COUNT(*) FROM appointment_slot s WHERE s.schedule_id = sc.id
+                  AND s.status = 'AVAILABLE' AND s.start_at > UTC_TIMESTAMP(3)
+                  AND sc.status = 'OPEN' AND d.status = 'ACTIVE' AND dp.status = 'ACTIVE') AS remaining,
+               (SELECT COUNT(*) FROM appointment a JOIN appointment_slot s ON s.id = a.slot_id
+                   WHERE s.schedule_id = sc.id AND a.status IN ('BOOKED', 'CHECKED_IN', 'VISITED')) AS booked,
+               EXISTS(SELECT 1 FROM schedule_interruption i WHERE i.schedule_id=sc.id) AS interrupted
+    </sql>
+
+    <sql id="scheduleFilters">
+        WHERE <include refid="departmentScope"/>
+        <if test="filters.departmentId != null">AND dp.id = #{filters.departmentId}</if>
+        <if test="filters.doctorId != null">AND d.id = #{filters.doctorId}</if>
+        <if test="filters.date != null">AND sc.schedule_date = #{filters.date}</if>
+        <if test="filters.from != null">AND sc.schedule_date &gt;= #{filters.from}</if>
+        <if test="filters.to != null">AND sc.schedule_date &lt;= #{filters.to}</if>
+        <if test="filters.status != null">AND sc.status = #{filters.status}</if>
+    </sql>
+
+    <select id="countDepartments" resultType="long" flushCache="true">
+        SELECT COUNT(*)
+        <include refid="departmentsSource"/>
+    </select>
+
+    <select id="departments" resultType="com.mediflow.agent.mapper.admin.catalog.AdminCatalogQueryMapper$DepartmentRow" flushCache="true">
+        SELECT id, code, name, description, status
+        <include refid="departmentsSource"/>
+        ORDER BY name, id LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="countDoctors" resultType="long" flushCache="true">
+        SELECT COUNT(*)
+        <include refid="doctorsSource"/>
+    </select>
+
+    <select id="doctors" resultType="com.mediflow.agent.mapper.admin.catalog.AdminCatalogQueryMapper$DoctorRow" flushCache="true">
+        SELECT d.id, d.department_id, dp.name AS department_name, d.name, d.title,
+               d.specialty, d.introduction, d.status, COALESCE(d.code,CONCAT('D-',d.id)) AS import_code
+        <include refid="doctorsSource"/>
+        ORDER BY dp.name, d.name, d.id LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="departmentOptions" resultType="com.mediflow.agent.mapper.admin.catalog.AdminCatalogQueryMapper$CatalogOptionRow" flushCache="true">
+        SELECT dp.id, dp.name, dp.status FROM department dp
+        WHERE <include refid="departmentScope"/>
+        ORDER BY dp.name, dp.id
+    </select>
+
+    <select id="countSchedules" resultType="long" flushCache="true">
+        SELECT COUNT(*)
+        <include refid="scheduleSource"/>
+        <include refid="scheduleFilters"/>
+    </select>
+
+    <select id="schedules" resultType="com.mediflow.agent.mapper.admin.catalog.AdminCatalogQueryMapper$ScheduleRow" flushCache="true">
+        <include refid="scheduleColumns"/>
+        <include refid="scheduleSource"/>
+        <include refid="scheduleFilters"/>
+        ORDER BY sc.schedule_date DESC, sc.id DESC LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <select id="schedule" resultType="com.mediflow.agent.mapper.admin.catalog.AdminCatalogQueryMapper$ScheduleRow" flushCache="true">
+        <include refid="scheduleColumns"/>
+        <include refid="scheduleSource"/>
+        WHERE sc.id = #{id}
+    </select>
+</mapper>

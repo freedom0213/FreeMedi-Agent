@@ -19,6 +19,7 @@ spring:
     clean-disabled: true
 
 mybatis-plus:
+  type-handlers-package: com.mediflow.agent.mapper.knowledge.type
   configuration:
     map-underscore-to-camel-case: true
 

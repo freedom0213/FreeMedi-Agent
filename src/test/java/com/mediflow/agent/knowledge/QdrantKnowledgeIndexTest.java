@@ -1,5 +1,12 @@
 package com.mediflow.agent.knowledge;
 
+import com.mediflow.agent.knowledge.document.KnowledgeDocType;
+import com.mediflow.agent.knowledge.document.KnowledgeStatus;
+import com.mediflow.agent.knowledge.embedding.LocalOnnxTextEmbedder;
+import com.mediflow.agent.knowledge.index.KnowledgeIndexFilter;
+import com.mediflow.agent.knowledge.index.KnowledgeIndexHit;
+import com.mediflow.agent.knowledge.index.KnowledgeIndexPoint;
+import com.mediflow.agent.knowledge.index.QdrantKnowledgeIndex;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 

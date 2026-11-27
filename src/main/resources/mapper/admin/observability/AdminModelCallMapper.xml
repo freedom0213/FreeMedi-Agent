@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mediflow.agent.mapper.admin.observability.AdminModelCallMapper">
+    <sql id="events">
+        WITH decoded AS (
+            SELECT e.id, e.task_id, e.event_no, e.created_at, e.reason_code,
+                   e.metadata -&gt;&gt; '$.outcome' AS outcome,
+                   e.metadata -&gt;&gt; '$.summary.adapter' AS adapter,
+                   e.metadata -&gt;&gt; '$.summary.modelVersion' AS logged_version,
+                   CASE WHEN JSON_TYPE(e.metadata -&gt; '$.durationMs') = 'INTEGER'
+                        THEN CAST(e.metadata -&gt;&gt; '$.durationMs' AS SIGNED) END AS logged_duration,
+                   CASE WHEN JSON_TYPE(e.metadata -&gt; '$.attempt') = 'INTEGER'
+                        THEN CAST(e.metadata -&gt;&gt; '$.attempt' AS SIGNED) END AS logged_attempt
+            FROM agent_state_event e
+            WHERE e.event_type = 'MODEL_DECISION' AND e.created_at &gt;= #{filter.start} AND e.created_at &lt; #{filter.end}
+        ), identified AS (
+            SELECT id, task_id, event_no, created_at, outcome,
+                   CASE WHEN REGEXP_LIKE(reason_code, '^[A-Z][A-Z0-9_]{0,63}$', 'c') THEN reason_code END AS reason,
+                   CASE WHEN logged_attempt BETWEEN 1 AND 2147483647 THEN logged_attempt END AS attempt,
+                   CASE WHEN logged_duration &gt;= 0 THEN logged_duration END AS duration_ms,
+                   CASE WHEN logged_version IN ('environment', 'built-in')
+                             OR REGEXP_LIKE(logged_version, #{filter.versionPattern}, 'c') THEN logged_version
+                        ELSE 'unrecorded' END AS version,
+                   CASE WHEN adapter = 'DemoDecisionModel' THEN 'demo'
+                        WHEN adapter = 'DeepSeekDecisionModel' OR REGEXP_LIKE(logged_version, #{filter.versionPattern}, 'c')
+                             THEN 'external'
+                        ELSE 'unspecified' END AS mode
+            FROM decoded WHERE outcome IN ('SUCCEEDED', 'FAILED')
+        ), model_events AS (
+            SELECT identified.*, CONCAT(mode, ':', version) AS model_key FROM identified
+        ), filtered AS (
+            SELECT * FROM model_events WHERE #{filter.model,jdbcType=VARCHAR} IS NULL OR model_key = #{filter.model,jdbcType=VARCHAR}
+        )
+    </sql>
+
+    <select id="modelOptions" resultType="com.mediflow.agent.mapper.admin.observability.AdminModelCallMapper$Model" flushCache="true">
+        <include refid="events"/>
+        SELECT options.model_key, options.mode, options.version, r.label, r.model_name
+        FROM (SELECT DISTINCT model_key, mode, version FROM model_events) options
+        LEFT JOIN agent_model_revision r ON options.version = CONCAT(r.profile_id, '/v', r.revision)
+        ORDER BY options.mode, r.label, r.revision, options.version
+    </select>
+
+    <select id="metrics" resultType="com.mediflow.agent.mapper.admin.observability.AdminModelCallMapper$MetricRow" flushCache="true">
+        <include refid="events"/>
+        , scopes AS (
+            SELECT model_key, outcome, attempt, duration_ms FROM filtered
+            UNION ALL
+            SELECT NULL, outcome, attempt, duration_ms FROM filtered
+        ), ranked AS (
+            SELECT scopes.*,
+                   ROW_NUMBER() OVER (PARTITION BY model_key ORDER BY duration_ms IS NULL, duration_ms) AS latency_rank,
+                   COUNT(duration_ms) OVER (PARTITION BY model_key) AS latency_samples
+            FROM scopes
+        )
+        SELECT model_key, COUNT(*) AS attempts, SUM(outcome = 'SUCCEEDED') AS succeeded,
+               SUM(outcome = 'FAILED') AS failed, SUM(CASE WHEN attempt &gt; 1 THEN 1 ELSE 0 END) AS retries,
+               AVG(duration_ms) AS average_ms,
+               MIN(CASE WHEN latency_rank &gt;= CEIL(latency_samples * 0.95) THEN duration_ms END) AS p95_ms
+        FROM ranked GROUP BY model_key
+    </select>
+
+    <select id="days" resultType="com.mediflow.agent.mapper.admin.observability.AdminModelCallMapper$Day" flushCache="true">
+        <include refid="events"/>
+        SELECT DATE(DATE_ADD(created_at, INTERVAL 8 HOUR)) AS observed_date,
+               SUM(outcome = 'SUCCEEDED') AS succeeded, SUM(outcome = 'FAILED') AS failed
+        FROM filtered GROUP BY observed_date
+    </select>
+
+    <select id="reasons" resultType="com.mediflow.agent.mapper.admin.observability.AdminModelCallMapper$Reason" flushCache="true">
+        <include refid="events"/>
+        SELECT reason, COUNT(*) AS attempts FROM filtered WHERE outcome = 'FAILED'
+        GROUP BY reason ORDER BY attempts DESC, reason
+    </select>
+
+    <select id="attempts" resultType="com.mediflow.agent.mapper.admin.observability.AdminModelCallMapper$AttemptRow" flushCache="true">
+        <include refid="events"/>
+        SELECT f.id, f.created_at, t.task_no, f.event_no, f.model_key, f.attempt, f.outcome, f.reason, f.duration_ms
+        FROM filtered f JOIN agent_task t ON t.id = f.task_id
+        WHERE (#{outcome,jdbcType=VARCHAR} IS NULL OR f.outcome = #{outcome,jdbcType=VARCHAR})
+          AND (#{beforeTime,jdbcType=TIMESTAMP} IS NULL OR (f.created_at, f.id) &lt; (#{beforeTime,jdbcType=TIMESTAMP}, #{beforeId,jdbcType=BIGINT}))
+        ORDER BY f.created_at DESC, f.id DESC LIMIT #{limit}
+    </select>
+</mapper>

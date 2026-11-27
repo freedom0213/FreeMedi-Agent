@@ -1,21 +1,24 @@
 package com.mediflow.agent.api;
 
+import com.mediflow.agent.mapper.appointment.AppointmentLockMapper;
+import com.mediflow.agent.mapper.appointment.AppointmentQueryMapper;
+import com.mediflow.agent.service.appointment.policy.HospitalRules;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.mediflow.agent.agent.AgentCallPolicy;
-import com.mediflow.agent.agent.AgentRuntime;
-import com.mediflow.agent.agent.Principal;
-import com.mediflow.agent.agent.TaskAction;
-import com.mediflow.agent.agent.TaskId;
-import com.mediflow.agent.agent.TaskStatus;
-import com.mediflow.agent.appointment.AdminCatalogService;
-import com.mediflow.agent.appointment.AppointmentWriteService;
-import com.mediflow.agent.appointment.AppointmentQueryService;
-import com.mediflow.agent.config.AgentSettings;
-import com.mediflow.agent.knowledge.KnowledgeImporter;
-import com.mediflow.agent.knowledge.KnowledgeIndex;
-import com.mediflow.agent.knowledge.KnowledgeIndexFilter;
-import com.mediflow.agent.knowledge.KnowledgeIndexer;
-import com.mediflow.agent.knowledge.KnowledgeRetriever;
+import com.mediflow.agent.agent.runtime.AgentCallPolicy;
+import com.mediflow.agent.agent.runtime.AgentRuntime;
+import com.mediflow.agent.agent.runtime.Principal;
+import com.mediflow.agent.agent.task.TaskAction;
+import com.mediflow.agent.agent.task.TaskId;
+import com.mediflow.agent.agent.task.TaskStatus;
+import com.mediflow.agent.service.admin.catalog.AdminCatalogService;
+import com.mediflow.agent.service.appointment.lifecycle.AppointmentWriteService;
+import com.mediflow.agent.service.appointment.query.AppointmentQueryService;
+import com.mediflow.agent.agent.settings.AgentSettings;
+import com.mediflow.agent.knowledge.ingest.KnowledgeImporter;
+import com.mediflow.agent.knowledge.index.KnowledgeIndex;
+import com.mediflow.agent.knowledge.index.KnowledgeIndexFilter;
+import com.mediflow.agent.knowledge.index.KnowledgeIndexer;
+import com.mediflow.agent.knowledge.search.KnowledgeRetriever;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.junit.jupiter.api.io.TempDir;
@@ -86,6 +89,9 @@ class MySqlAdminKnowledgeTest {
             请按预约时间到院。
             """;
 
+    @Autowired AppointmentQueryMapper appointmentQueryMapper;
+    @Autowired AppointmentLockMapper appointmentLockMapper;
+    @Autowired HospitalRules directoryHospitalRules;
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper json;
     @Autowired AgentCallPolicy agentCalls;
@@ -1405,15 +1411,16 @@ class MySqlAdminKnowledgeTest {
         long adminId = jdbc.queryForObject("SELECT id FROM sys_user WHERE username = ?", Long.class, ADMIN);
         var transactions = beanFactory.getBean(org.springframework.transaction.PlatformTransactionManager.class);
         for (var outside : java.util.List.of(start.minusSeconds(1801), start.plusSeconds(900))) {
-            var writer = new AppointmentWriteService(jdbc.getDataSource(), transactions, java.time.Clock.fixed(outside, java.time.ZoneOffset.UTC));
+            var writer = new AppointmentWriteService(jdbc.getDataSource(), transactions,
+                    java.time.Clock.fixed(outside, java.time.ZoneOffset.UTC), directoryHospitalRules, appointmentLockMapper);
             assertThat(writer.checkIn(number, adminId).code()).isEqualTo("CHECK_IN_OUTSIDE_WINDOW");
         }
         var end = start.plusSeconds(900);
-        var readBeforeEnd = new AppointmentQueryService(jdbc.getDataSource(),
-                java.time.Clock.fixed(end.minusMillis(1), java.time.ZoneOffset.UTC));
-        var readAtEnd = new AppointmentQueryService(jdbc.getDataSource(),
-                java.time.Clock.fixed(end, java.time.ZoneOffset.UTC));
-        var all = new com.mediflow.agent.config.AdminAccess.Scope(true, java.util.Set.of());
+        var readBeforeEnd = new AppointmentQueryService(appointmentQueryMapper, appointmentLockMapper,
+                java.time.Clock.fixed(end.minusMillis(1), java.time.ZoneOffset.UTC), directoryHospitalRules);
+        var readAtEnd = new AppointmentQueryService(appointmentQueryMapper, appointmentLockMapper,
+                java.time.Clock.fixed(end, java.time.ZoneOffset.UTC), directoryHospitalRules);
+        var all = new com.mediflow.agent.security.account.AdminAccess.Scope(true, java.util.Set.of());
         var scope = new AppointmentQueryService.RegisterAccess(all, all, all, date);
         var expiredFilter = new AppointmentQueryService.AdminFilters(number, null, null, null, null,
                 null, null, AppointmentQueryService.Status.EXPIRED, false, null);
@@ -1653,8 +1660,8 @@ class MySqlAdminKnowledgeTest {
                     .andExpect(status().isOk()).andExpect(jsonPath("$.profile.name").value("演示医院"));
             var end = LocalDate.now(ZoneId.of("Asia/Shanghai")).plusDays(9);
             mvc.perform(get("/api/v1/slots/window")).andExpect(jsonPath("$.searchEndDate").value(end.toString()));
-            var query = beanFactory.getBean(com.mediflow.agent.appointment.SlotQueryService.class);
-            assertThat(query.searchStrict(new com.mediflow.agent.appointment.SlotCriteria(
+            var query = beanFactory.getBean(com.mediflow.agent.service.appointment.query.SlotQueryService.class);
+            assertThat(query.searchStrict(new com.mediflow.agent.service.appointment.query.SlotCriteria(
                     null, "SETUP-CLINIC", null, null, null, null, 20)).searchEndDate()).isEqualTo(end);
             mvc.perform(get(base).session(admin)).andExpect(jsonPath("$.rules.cancellationCutoff").value("21:00:00"));
         } finally {
@@ -1864,7 +1871,7 @@ class MySqlAdminKnowledgeTest {
                 .andExpect(jsonPath("$.error").value("只可登记当日预约的就诊结果。"));
         catalogPost(target + "/check-in", triage, triageToken, null).andExpect(status().isOk());
         var nextDayClock = java.time.Clock.fixed(today.plusDays(1).atStartOfDay(ZoneId.of("Asia/Shanghai")).toInstant(), java.time.ZoneOffset.UTC);
-        var nextDay = new AppointmentQueryService(jdbc.getDataSource(), nextDayClock);
+        var nextDay = new AppointmentQueryService(appointmentQueryMapper, appointmentLockMapper, nextDayClock, directoryHospitalRules);
         var closed = nextDay.findForPatient(own, 1001).orElseThrow();
         assertThat(closed.status()).isEqualTo("VISIT_UNCONFIRMED");
         assertThat(closed.checkedInAt()).isNotNull();

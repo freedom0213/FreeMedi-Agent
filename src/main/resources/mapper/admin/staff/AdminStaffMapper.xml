@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mediflow.agent.mapper.admin.staff.AdminStaffMapper">
+    <select id="securityEvents" resultType="com.mediflow.agent.mapper.admin.staff.AdminStaffMapper$SecurityEventRow" flushCache="true">
+        SELECT e.id, u.display_name, e.action, e.occurred_at
+        FROM account_security_event e JOIN sys_user u ON u.id=e.actor_id
+        WHERE e.account_id = #{id}
+        <if test="before != null">
+            AND e.id &lt; #{before}
+        </if>
+        ORDER BY e.id DESC LIMIT 21
+    </select>
+</mapper>

@@ -1,5 +1,10 @@
 package com.mediflow.agent.knowledge;
 
+import com.mediflow.agent.knowledge.document.KnowledgeChunk;
+import com.mediflow.agent.knowledge.document.KnowledgeDocument;
+import com.mediflow.agent.knowledge.document.KnowledgeStatus;
+import com.mediflow.agent.knowledge.ingest.KnowledgeImporter;
+import com.mediflow.agent.service.knowledge.KnowledgeStorageService;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
@@ -30,7 +35,7 @@ import org.springframework.test.context.DynamicPropertySource;
 class MySqlKnowledgeImportTest {
 
     @Autowired KnowledgeImporter importer;
-    @Autowired KnowledgeRepository repository;
+    @Autowired KnowledgeStorageService repository;
     @Autowired JdbcTemplate jdbc;
 
     @TempDir Path materialDir;

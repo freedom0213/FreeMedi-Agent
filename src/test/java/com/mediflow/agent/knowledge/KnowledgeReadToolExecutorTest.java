@@ -1,16 +1,20 @@
 package com.mediflow.agent.knowledge;
 
+import com.mediflow.agent.knowledge.document.KnowledgeDocType;
+import com.mediflow.agent.knowledge.index.KnowledgeIndexFilter;
+import com.mediflow.agent.knowledge.search.KnowledgeReadToolExecutor;
+import com.mediflow.agent.knowledge.search.KnowledgeRetriever;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-import com.mediflow.agent.agent.DoctorDirectory;
-import com.mediflow.agent.agent.DepartmentCatalog;
-import com.mediflow.agent.agent.KnowledgeConsultation;
-import com.mediflow.agent.agent.TaskContext;
-import com.mediflow.agent.agent.TaskId;
-import com.mediflow.agent.agent.ToolCall;
+import com.mediflow.agent.agent.booking.DoctorDirectory;
+import com.mediflow.agent.agent.booking.DepartmentCatalog;
+import com.mediflow.agent.agent.runtime.KnowledgeConsultation;
+import com.mediflow.agent.agent.task.TaskContext;
+import com.mediflow.agent.agent.task.TaskId;
+import com.mediflow.agent.agent.tool.ToolCall;
 
 import org.junit.jupiter.api.Test;
 
@@ -126,7 +130,7 @@ class KnowledgeReadToolExecutorTest {
         verifyNoInteractions(retriever);
     }
 
-    private com.mediflow.agent.agent.ToolResult call(String patient, Map<String, Object> arguments) {
+    private com.mediflow.agent.agent.tool.ToolResult call(String patient, Map<String, Object> arguments) {
         var task = new TaskContext(new TaskId("knowledge-test"), 1001);
         task.beginTurn(patient);
         return tool.execute(new ToolCall(KnowledgeConsultation.TOOL_NAME, arguments), task.snapshot());

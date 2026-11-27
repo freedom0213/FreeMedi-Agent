@@ -3,15 +3,15 @@ package com.mediflow.agent.config;
 import java.time.Duration;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.mediflow.agent.knowledge.ApiTextEmbedder;
-import com.mediflow.agent.knowledge.DisabledKnowledgeIndex;
-import com.mediflow.agent.knowledge.InMemoryKnowledgeIndex;
-import com.mediflow.agent.knowledge.KnowledgeChunker;
-import com.mediflow.agent.knowledge.KnowledgeIndex;
-import com.mediflow.agent.knowledge.KnowledgeMarkdownParser;
-import com.mediflow.agent.knowledge.LocalOnnxTextEmbedder;
-import com.mediflow.agent.knowledge.QdrantKnowledgeIndex;
-import com.mediflow.agent.knowledge.TextEmbedder;
+import com.mediflow.agent.knowledge.embedding.ApiTextEmbedder;
+import com.mediflow.agent.knowledge.index.DisabledKnowledgeIndex;
+import com.mediflow.agent.knowledge.index.InMemoryKnowledgeIndex;
+import com.mediflow.agent.knowledge.ingest.KnowledgeChunker;
+import com.mediflow.agent.knowledge.index.KnowledgeIndex;
+import com.mediflow.agent.knowledge.ingest.KnowledgeMarkdownParser;
+import com.mediflow.agent.knowledge.embedding.LocalOnnxTextEmbedder;
+import com.mediflow.agent.knowledge.index.QdrantKnowledgeIndex;
+import com.mediflow.agent.knowledge.embedding.TextEmbedder;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mediflow.agent.mapper.guide.GuideEventMapper">
+    <sql id="traceByTask">
+        SELECT e.event_no, e.created_at, e.event_type, e.from_status, e.to_status, e.reason_code, e.metadata
+        FROM agent_state_event e
+        JOIN agent_task t ON t.id = e.task_id
+        WHERE t.task_no = #{taskId}
+    </sql>
+
+    <select id="patientTrace" resultType="com.mediflow.agent.mapper.guide.GuideEventMapper$TraceRow" flushCache="true">
+        <include refid="traceByTask"/>
+        AND t.patient_id = #{patientId}
+        ORDER BY e.event_no
+    </select>
+
+    <select id="adminTraceActions" resultType="com.mediflow.agent.mapper.guide.GuideEventMapper$TraceRow" flushCache="true">
+        <include refid="traceByTask"/>
+        AND e.event_no &gt; #{after} AND e.metadata IS NOT NULL
+        ORDER BY e.event_no LIMIT #{limit}
+    </select>
+</mapper>

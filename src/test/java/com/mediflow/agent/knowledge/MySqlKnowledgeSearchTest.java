@@ -1,5 +1,18 @@
 package com.mediflow.agent.knowledge;
 
+import com.mediflow.agent.knowledge.document.KnowledgeChunk;
+import com.mediflow.agent.knowledge.embedding.TextEmbedder;
+import com.mediflow.agent.knowledge.index.InMemoryKnowledgeIndex;
+import com.mediflow.agent.knowledge.index.KnowledgeIndex;
+import com.mediflow.agent.knowledge.index.KnowledgeIndexFilter;
+import com.mediflow.agent.knowledge.index.KnowledgeIndexHit;
+import com.mediflow.agent.knowledge.index.KnowledgeIndexPoint;
+import com.mediflow.agent.knowledge.index.KnowledgeIndexer;
+import com.mediflow.agent.knowledge.ingest.KnowledgeImporter;
+import com.mediflow.agent.knowledge.search.KnowledgeRetriever;
+import com.mediflow.agent.mapper.knowledge.KnowledgeMapper.PendingChunk;
+import com.mediflow.agent.service.knowledge.KnowledgeIndexMaintenanceLock;
+import com.mediflow.agent.service.knowledge.KnowledgeStorageService;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -40,7 +53,8 @@ class MySqlKnowledgeSearchTest {
     @Autowired KnowledgeImporter importer;
     @Autowired KnowledgeIndexer indexer;
     @Autowired KnowledgeRetriever retriever;
-    @Autowired KnowledgeRepository repository;
+    @Autowired KnowledgeStorageService repository;
+    @Autowired KnowledgeIndexMaintenanceLock maintenanceLock;
     @Autowired KnowledgeIndex index;
     @Autowired TextEmbedder embedder;
     @Autowired Clock clock;
@@ -223,7 +237,7 @@ class MySqlKnowledgeSearchTest {
         // A stub index that rejects one specific point, to exercise the partial-failure path that the
         // real in-memory index never produces.
         KnowledgeIndexer fragile = new KnowledgeIndexer(repository, embedder,
-                new RejectingIndex(rejectedChunkId), clock);
+                new RejectingIndex(rejectedChunkId), clock, maintenanceLock);
 
         KnowledgeIndexer.IndexSummary summary = fragile.indexPending();
 
@@ -236,7 +250,7 @@ class MySqlKnowledgeSearchTest {
         assertThat(embeddingStatus(chunks.get(1).id())).isEqualTo("INDEXED");
         // The failure is retryable: a later run picks the chunk up again.
         assertThat(repository.findChunksPendingIndex(10))
-                .extracting(KnowledgeRepository.PendingChunk::chunkId).contains(rejectedChunkId);
+                .extracting(PendingChunk::chunkId).contains(rejectedChunkId);
     }
 
     private String embeddingStatus(long chunkId) {

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mediflow.agent.mapper.admin.catalog.AdminCatalogWriteMapper">
+    <select id="lockOverlappingSlots" resultType="long" flushCache="true">
+        SELECT s.id FROM appointment_slot s JOIN doctor_schedule sc ON sc.id = s.schedule_id
+        WHERE sc.doctor_id = #{doctorId} AND sc.schedule_date = #{date} AND sc.status = 'OPEN'
+          AND s.start_at &lt; #{end} AND s.end_at &gt; #{start} FOR UPDATE
+    </select>
+
+    <select id="lockActiveScheduleBookings" resultType="long" flushCache="true">
+        SELECT a.id FROM appointment a JOIN appointment_slot s ON s.id = a.slot_id
+        WHERE s.schedule_id = #{id} AND a.status IN ('BOOKED', 'CHECKED_IN', 'VISITED') FOR UPDATE
+    </select>
+
+    <sql id="futureBookings">
+        SELECT a.id FROM appointment a JOIN appointment_slot s ON s.id = a.slot_id
+        WHERE a.status IN ('BOOKED', 'CHECKED_IN', 'VISITED') AND s.end_at > UTC_TIMESTAMP(3)
+    </sql>
+
+    <select id="lockFutureDepartmentBookings" resultType="long" flushCache="true">
+        <include refid="futureBookings"/>
+        AND a.department_id = #{departmentId} FOR UPDATE
+    </select>
+
+    <select id="lockFutureDoctorBookings" resultType="long" flushCache="true">
+        <include refid="futureBookings"/>
+        AND a.doctor_id = #{doctorId} FOR UPDATE
+    </select>
+</mapper>

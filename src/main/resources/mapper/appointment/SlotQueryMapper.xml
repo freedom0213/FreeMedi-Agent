@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mediflow.agent.mapper.appointment.SlotQueryMapper">
+    <sql id="matchingSlots">
+        FROM appointment_slot s
+        JOIN doctor_schedule ds ON ds.id = s.schedule_id
+        JOIN doctor dr ON dr.id = ds.doctor_id
+        JOIN department d ON d.id = dr.department_id
+        WHERE s.status = 'AVAILABLE'
+        AND ds.status = 'OPEN'
+        AND dr.status = 'ACTIVE'
+        AND d.status = 'ACTIVE'
+        AND s.start_at > #{now}
+        AND ds.schedule_date BETWEEN #{from} AND #{until}
+        <if test="slotId != null">AND s.id = #{slotId}</if>
+        <if test="criteria.departmentId != null">AND d.id = #{criteria.departmentId}</if>
+        <if test="criteria.doctorId != null">AND dr.id = #{criteria.doctorId}</if>
+        <if test="criteria.departmentName != null">AND (d.name = #{criteria.departmentName} OR d.code = #{criteria.departmentName})</if>
+        <if test="criteria.doctorName != null">AND dr.name = #{criteria.doctorName}</if>
+        <if test="criteria.appointmentDate != null">AND ds.schedule_date = #{criteria.appointmentDate}</if>
+        <if test="criteria.clinicPeriod != null">AND ds.clinic_period = #{criteria.clinicPeriod}</if>
+    </sql>
+
+    <select id="count" resultType="int" flushCache="true">
+        SELECT COUNT(*)
+        <include refid="matchingSlots"/>
+    </select>
+
+    <select id="find" resultType="com.mediflow.agent.mapper.appointment.SlotQueryMapper$SlotRow" flushCache="true">
+        SELECT s.id AS slot_id, d.id AS department_id, d.code AS department_code,
+        d.name AS department_name, dr.id AS doctor_id, dr.name AS doctor_name,
+        dr.title AS doctor_title, ds.schedule_date, ds.clinic_period,
+        s.start_at, s.end_at
+        <include refid="matchingSlots"/>
+        ORDER BY ds.schedule_date, s.start_at, dr.id, s.slot_no, s.id
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+</mapper>

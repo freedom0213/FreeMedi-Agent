@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mediflow.agent.mapper.guide.GuideSessionMapper">
+    <select id="history" resultType="com.mediflow.agent.mapper.guide.GuideSessionMapper$ConversationRow" flushCache="true">
+        SELECT t.id, t.task_no,
+               COALESCE(NULLIF(LEFT(TRIM(first_turn.user_message), 64), ''),
+                        NULLIF(s.title, ''), '智能导诊与预约') AS title,
+               t.status, t.updated_at
+        FROM agent_task t
+        JOIN agent_session s ON s.id = t.session_id AND s.patient_id = t.patient_id
+        LEFT JOIN agent_turn first_turn ON first_turn.task_id = t.id AND first_turn.turn_no = 1
+        WHERE t.patient_id = #{patientId} AND t.task_type = 'APPOINTMENT_BOOKING'
+        <if test="before != null">
+            AND t.id &lt; #{before}
+        </if>
+        ORDER BY t.id DESC LIMIT #{limit}
+    </select>
+</mapper>

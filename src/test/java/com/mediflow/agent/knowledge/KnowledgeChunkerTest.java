@@ -1,5 +1,6 @@
 package com.mediflow.agent.knowledge;
 
+import com.mediflow.agent.knowledge.ingest.KnowledgeChunker;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -7,7 +8,7 @@ import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
-import com.mediflow.agent.knowledge.KnowledgeChunker.Piece;
+import com.mediflow.agent.knowledge.ingest.KnowledgeChunker.Piece;
 
 /** Chunking is pure logic, so it is tested without a database, an embedding model or a vector store. */
 class KnowledgeChunkerTest {

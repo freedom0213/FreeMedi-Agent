@@ -5,7 +5,7 @@
 
 ## 1. 任务检查点与恢复
 
-[TaskStateStore](../../src/main/java/com/mediflow/agent/agent/TaskStateStore.java)隔离存储技术：
+[TaskStateStore](../../src/main/java/com/mediflow/agent/agent/persistence/TaskStateStore.java)隔离存储技术：
 
 - `InMemoryTaskStateStore`供行为测试使用，进程重启后丢失数据。
 - [MySqlTaskStateStore](../../src/main/java/com/mediflow/agent/agent/persistence/MySqlTaskStateStore.java)在 `mysql` profile 下启用，通过 MyBatis 注解 Mapper 保存任务。
@@ -20,7 +20,7 @@
 
 ## 2. 预约事务与审计
 
-[AppointmentWriteService](../../src/main/java/com/mediflow/agent/appointment/AppointmentWriteService.java)是 Agent 与普通挂号共用的预约写入口：
+[AppointmentWriteService](../../src/main/java/com/mediflow/agent/service/appointment/lifecycle/AppointmentWriteService.java)是 Agent 与普通挂号共用的预约写入口：
 
 1. Agent 路径锁定并校验所属方案、版本、确认状态与期限；普通挂号直接提供具体号源。
 2. 按患者和幂等键查找原预约。Agent 路径比对方案，普通挂号路径比对号源；将键用于其他目标会返回冲突。
@@ -92,7 +92,7 @@ java -jar target/mediflow-agent-0.1.0-SNAPSHOT.jar --spring.profiles.active=mysq
 
 ## 5. HTTP 与 SSE 的实际边界
 
-[AgentTaskController](../../src/main/java/com/mediflow/agent/api/AgentTaskController.java)在 `mysql` profile 下提供：
+[AgentTaskController](../../src/main/java/com/mediflow/agent/controller/patient/guide/AgentTaskController.java)在 `mysql` profile 下提供：
 
 | 路径 | 语义 |
 |---|---|

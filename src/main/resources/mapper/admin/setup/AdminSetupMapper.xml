@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.mediflow.agent.mapper.admin.setup.AdminSetupMapper">
+    <select id="readiness" resultType="com.mediflow.agent.mapper.admin.setup.AdminSetupMapper$Readiness" flushCache="true">
+        SELECT (SELECT COUNT(*) FROM department WHERE status='ACTIVE'),
+               (SELECT COUNT(*) FROM doctor d JOIN department dp ON dp.id=d.department_id
+                 WHERE d.status='ACTIVE' AND dp.status='ACTIVE'),
+               (SELECT COUNT(*) FROM doctor_schedule sc JOIN doctor d ON d.id=sc.doctor_id
+                 JOIN department dp ON dp.id=d.department_id
+                 WHERE sc.status='OPEN' AND d.status='ACTIVE' AND dp.status='ACTIVE' AND sc.schedule_date BETWEEN #{from} AND #{to}
+                 AND EXISTS(SELECT 1 FROM appointment_slot s WHERE s.schedule_id=sc.id
+                     AND s.status='AVAILABLE' AND s.start_at &gt; #{now}))
+    </select>
+</mapper>
