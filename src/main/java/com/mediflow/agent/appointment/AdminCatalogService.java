@@ -19,11 +19,13 @@ import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Pattern;
 
 @Service
 @Profile("mysql")
 public class AdminCatalogService {
     private static final int PAGE_SIZE = 20;
+    private static final Pattern GENERATED_DOCTOR_CODE = Pattern.compile("D-[0-9]+", Pattern.CASE_INSENSITIVE);
     private static final ZoneId HOSPITAL = ZoneId.of("Asia/Shanghai");
     private static final String SCHEDULE_SOURCE = """
             FROM doctor_schedule sc JOIN doctor d ON d.id = sc.doctor_id
@@ -163,6 +165,7 @@ public class AdminCatalogService {
 
     @Transactional
     public void createDoctor(long departmentId, String code, String name, String title, String specialty, String introduction) {
+        validateNewDoctorCode(code);
         if (!"ACTIVE".equals(AppointmentAvailability.lockDepartment(jdbc, departmentId))) {
             throw conflict("请为医生选择已启用的科室。");
         }
@@ -170,6 +173,12 @@ public class AdminCatalogService {
                 INSERT INTO doctor (department_id, code, name, title, specialty, introduction, status)
                 VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE')
                 """, departmentId, code, name.strip(), clean(title), clean(specialty), clean(introduction));
+    }
+
+    static void validateNewDoctorCode(String code) {
+        if (code != null && GENERATED_DOCTOR_CODE.matcher(code).matches()) {
+            throw new IllegalArgumentException("D- 加数字是系统保留的医生编码，请使用其他编码。");
+        }
     }
 
     @Transactional

@@ -53,7 +53,14 @@ public class AdminSetupController {
         SetupProfile profile = jdbc.queryForObject("SELECT hospital_name, contact, activated_at FROM hospital_settings WHERE id=1",
                 (row, i) -> new SetupProfile(row.getString(1), row.getString(2),
                         row.getTimestamp(3) == null ? null : row.getTimestamp(3).toInstant()));
-        return new Setup(profile, rules.active(), HospitalRules.DEFAULTS, checks(), HospitalRules.ZONE.getId(), !rules.bookingEnabled());
+        var activeRules = rules.active();
+        return new Setup(profile, activeRules, HospitalRules.DEFAULTS, checks(activeRules.patientDays()),
+                HospitalRules.ZONE.getId(), !rules.bookingEnabled());
+    }
+
+    @GetMapping("/checks")
+    public Checks previewChecks(@RequestParam @Min(1) @Max(90) int patientDays) {
+        return checks(patientDays);
     }
 
     @PutMapping("/activate")
@@ -84,10 +91,6 @@ public class AdminSetupController {
     @PostMapping("/import/commit")
     public int commit(@Valid @RequestBody Import input) {
         return catalog.commit(input.kind(), input.csv(), input.token());
-    }
-
-    private Checks checks() {
-        return checks(rules.active().patientDays());
     }
 
     private Checks checks(int patientDays) {

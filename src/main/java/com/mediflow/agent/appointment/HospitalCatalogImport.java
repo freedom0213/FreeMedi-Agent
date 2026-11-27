@@ -77,14 +77,23 @@ public class HospitalCatalogImport {
                 var fields = fields(lines[i]);
                 if (fields.size() != kind.header.split(",").length) throw invalid("列数与表头不一致。");
                 var code = code(fields.get(0));
-                key = kind == Kind.SCHEDULES ? code + "/" + fields.get(1) + "/" + fields.get(2) : code;
+                if (kind == Kind.SCHEDULES) {
+                    key = code + "/" + fields.get(1) + "/" + fields.get(2);
+                    var date = LocalDate.parse(fields.get(1));
+                    var normalizedPeriod = SlotQueryService.normalisePeriod(fields.get(2));
+                    if (normalizedPeriod == null) throw invalid("请填写具体的就诊时段。");
+                    var period = AdminCatalogService.Period.valueOf(normalizedPeriod);
+                    key = code + "/" + date + "/" + period.name();
+                    if (!keys.add(key)) throw invalid("文件中存在重复记录。");
+                    entries.add(schedule(line, key, code, date, period, fields));
+                    continue;
+                }
+                key = code;
                 if (!keys.add(key)) throw invalid("文件中存在重复记录。");
-                entries.add(switch (kind) {
-                    case DEPARTMENTS -> department(line, code, value(fields.get(1), 100, true));
-                    case DOCTORS -> doctor(line, code, value(fields.get(1), 100, true), code(fields.get(2)),
-                            value(fields.get(3), 80, false));
-                    case SCHEDULES -> schedule(line, key, code, fields);
-                });
+                entries.add(kind == Kind.DEPARTMENTS
+                        ? department(line, code, value(fields.get(1), 100, true))
+                        : doctor(line, code, value(fields.get(1), 100, true), code(fields.get(2)),
+                                value(fields.get(3), 80, false)));
             } catch (IllegalArgumentException | java.time.DateTimeException error) {
                 entries.add(new Entry(new Row(line, key, "ERROR", error instanceof java.time.DateTimeException
                         ? "日期或时间格式有误，请使用 YYYY-MM-DD 和 HH:mm。" : error.getMessage()), null));
@@ -106,15 +115,14 @@ public class HospitalCatalogImport {
         if (existing != null) return duplicate(line, code, existing.department() == department.id()
                 && name.equals(existing.name()) && title.equals(Objects.toString(existing.title(), ""))
                 && "ACTIVE".equals(existing.status()));
+        AdminCatalogService.validateNewDoctorCode(code);
         return ready(line, code, () -> catalog.createDoctor(department.id(), code, name, title, null, null));
     }
 
-    private Entry schedule(int line, String key, String code, List<String> fields) {
+    private Entry schedule(int line, String key, String code, LocalDate date, AdminCatalogService.Period period,
+                           List<String> fields) {
         var existing = doctor(code);
         if (existing == null || !"ACTIVE".equals(existing.status())) throw invalid("医生或所属科室不存在或未启用。");
-        var date = LocalDate.parse(fields.get(1));
-        var period = AdminCatalogService.Period.valueOf(SlotQueryService.normalisePeriod(fields.get(2)) == null
-                ? "" : SlotQueryService.normalisePeriod(fields.get(2)));
         var start = LocalTime.parse(fields.get(3));
         int minutes = number(fields.get(4), 5, 120);
         int count = number(fields.get(5), 1, 40);
@@ -143,12 +151,15 @@ public class HospitalCatalogImport {
     }
 
     private Doctor doctor(String code) {
-        return jdbc.query("""
+        var matches = jdbc.query("""
                 SELECT d.id,d.department_id,d.name,d.title,IF(dp.status='ACTIVE',d.status,'DISABLED')
                 FROM doctor d JOIN department dp ON dp.id=d.department_id
                 WHERE d.code=? OR (d.code IS NULL AND CONCAT('D-',d.id)=?)
+                LIMIT 2
                 """, (row, i) -> new Doctor(row.getLong(1), row.getLong(2), row.getString(3), row.getString(4), row.getString(5)),
-                code, code).stream().findFirst().orElse(null);
+                code, code);
+        if (matches.size() > 1) throw invalid("此编码对应多位医生，请核对医生目录中的编码冲突。");
+        return matches.isEmpty() ? null : matches.get(0);
     }
 
     private static List<String> fields(String input) {

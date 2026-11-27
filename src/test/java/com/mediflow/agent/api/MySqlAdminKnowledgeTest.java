@@ -1532,6 +1532,102 @@ class MySqlAdminKnowledgeTest {
     }
 
     @Test
+    @Transactional
+    void hospitalSetupChecksTheProposedPatientWindowWithoutChangingRules() throws Exception {
+        var admin = signIn(ADMIN_AUTH, ADMIN, ADMIN_PASSWORD, new MockHttpSession(), 204);
+        var token = csrf(ADMIN_AUTH, admin);
+        String base = "/api/v1/admin/setup";
+        var today = LocalDate.now(ZoneId.of("Asia/Shanghai"));
+        var date = today.plusDays(39);
+        jdbc.update("UPDATE doctor_schedule SET status='CLOSED' WHERE schedule_date BETWEEN ? AND ?", today, date);
+        long department = newClinic("SETUP-WINDOW");
+        long doctor = jdbc.queryForObject("SELECT id FROM doctor WHERE department_id=?", Long.class, department);
+        adminCatalog.createSchedule(department, doctor, date, AdminCatalogService.Period.MORNING, LocalTime.of(9, 0), 15, 1);
+
+        mvc.perform(get(base + "/checks").session(admin).param("patientDays", "39"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.schedules").value(0));
+        mvc.perform(get(base + "/checks").session(admin).param("patientDays", "40"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.schedules").value(1));
+        mvc.perform(get(base + "/checks").session(admin).param("patientDays", "91"))
+                .andExpect(status().isBadRequest());
+        mvc.perform(get(base).session(admin)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.rules.patientDays").value(28)).andExpect(jsonPath("$.checks.schedules").value(0));
+        catalogPut(base + "/activate", admin, token, Map.of("name", "窗口验收医院", "contact", "0000-000000",
+                        "scheduleDays", 60, "patientDays", 40, "cancellationCutoff", "21:00", "checkInLead", 15))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.checks.schedules").value(1));
+    }
+
+    @Test
+    @Transactional
+    void doctorImportReservesGeneratedCodesForNewDoctors() throws Exception {
+        var admin = signIn(ADMIN_AUTH, ADMIN, ADMIN_PASSWORD, new MockHttpSession(), 204);
+        var token = csrf(ADMIN_AUTH, admin);
+        adminCatalog.createDepartment("SETUP-RESERVED", "编码验收科室", null);
+        var csv = "code,name,departmentCode,title\nd-99999999,验收医生,SETUP-RESERVED,";
+        catalogPost("/api/v1/admin/setup/import/preview", admin, token, Map.of("kind", "DOCTORS", "csv", csv))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows[0].state").value("ERROR"))
+                .andExpect(jsonPath("$.rows[0].message").value(org.hamcrest.Matchers.containsString("保留")));
+
+        jdbc.update("""
+                INSERT INTO doctor (department_id, code, name, status)
+                SELECT id, 'D-99999999', '验收医生', 'ACTIVE' FROM department WHERE code='SETUP-RESERVED'
+                """);
+        catalogPost("/api/v1/admin/setup/import/preview", admin, token, Map.of("kind", "DOCTORS", "csv", csv))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows[0].state").value("SKIP"));
+    }
+
+    @Test
+    @Transactional
+    void scheduleImportRejectsAnAmbiguousLegacyCodeEvenAfterPreview() throws Exception {
+        var admin = signIn(ADMIN_AUTH, ADMIN, ADMIN_PASSWORD, new MockHttpSession(), 204);
+        var token = csrf(ADMIN_AUTH, admin);
+        String base = "/api/v1/admin/setup/import";
+        long department = newClinic("SETUP-COLLISION");
+        long doctor = jdbc.queryForObject("SELECT id FROM doctor WHERE department_id=?", Long.class, department);
+        String code = "D-" + doctor;
+        var date = LocalDate.now(ZoneId.of("Asia/Shanghai")).plusDays(2);
+        var csv = "doctorCode,date,period,start,minutes,count\n" + code + "," + date + ",MORNING,09:00,15,1";
+        var input = Map.of("kind", "SCHEDULES", "csv", csv);
+        String preview = json.readTree(catalogPost(base + "/preview", admin, token, input)
+                .andExpect(status().isOk()).andExpect(jsonPath("$.rows[0].state").value("CREATE"))
+                .andReturn().getResponse().getContentAsByteArray()).get("token").asText();
+
+        jdbc.update("""
+                INSERT INTO doctor (department_id, code, name, status)
+                SELECT department_id, ?, '旧版编号医生', 'ACTIVE' FROM doctor WHERE id=?
+                """, code, doctor);
+        catalogPost(base + "/preview", admin, token, input).andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows[0].state").value("ERROR"))
+                .andExpect(jsonPath("$.rows[0].message").value(org.hamcrest.Matchers.containsString("多位医生")));
+        catalogPost(base + "/commit", admin, token, Map.of("kind", "SCHEDULES", "csv", csv, "token", preview))
+                .andExpect(status().isConflict());
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM doctor_schedule WHERE doctor_id=? OR doctor_id IN " +
+                "(SELECT id FROM doctor WHERE code=?)", Integer.class, doctor, code)).isZero();
+    }
+
+    @Test
+    @Transactional
+    void scheduleImportDetectsDuplicatesAcrossPeriodSpellings() throws Exception {
+        var admin = signIn(ADMIN_AUTH, ADMIN, ADMIN_PASSWORD, new MockHttpSession(), 204);
+        var token = csrf(ADMIN_AUTH, admin);
+        long department = newClinic("SETUP-DUPLICATE");
+        long doctor = jdbc.queryForObject("SELECT id FROM doctor WHERE department_id=?", Long.class, department);
+        var date = LocalDate.now(ZoneId.of("Asia/Shanghai")).plusDays(2);
+        String row = "D-" + doctor + "," + date + ",";
+        String csv = "doctorCode,date,period,start,minutes,count\n"
+                + row + "MORNING,09:00,15,1\n" + row + "morning,09:15,15,1\n" + row + "上午,09:30,15,1";
+        catalogPost("/api/v1/admin/setup/import/preview", admin, token, Map.of("kind", "SCHEDULES", "csv", csv))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.rows[0].state").value("CREATE"))
+                .andExpect(jsonPath("$.rows[1].state").value("ERROR"))
+                .andExpect(jsonPath("$.rows[1].message").value("文件中存在重复记录。"))
+                .andExpect(jsonPath("$.rows[2].state").value("ERROR"))
+                .andExpect(jsonPath("$.rows[2].message").value("文件中存在重复记录。"));
+    }
+
+    @Test
     void hospitalSetupPreviewsThenImportsAndAppliesRulesToBothBookingPaths() throws Exception {
         var admin = signIn(ADMIN_AUTH, ADMIN, ADMIN_PASSWORD, new MockHttpSession(), 204);
         var token = csrf(ADMIN_AUTH, admin);

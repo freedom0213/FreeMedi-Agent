@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { activateHospitalSetup, agentSettingsError, commitCatalogImport, previewCatalogImport, readHospitalSetup,
+import { activateHospitalSetup, agentSettingsError, commitCatalogImport, previewCatalogImport, readHospitalSetup, readSetupChecks,
   type CatalogImportPreview, type HospitalRules, type ImportKind } from '../api/admin'
 import { useKnowledgeRead } from './useKnowledgeRead'
 
@@ -21,7 +21,18 @@ const templates = {
   SCHEDULES: { label: '排班和号源', header: 'doctorCode,date,period,start,minutes,count', example: 'DOC-X,YYYY-MM-DD,MORNING,09:00,15,4' },
 }
 const states = { CREATE: '可导入', SKIP: '跳过', ERROR: '需修正' }
-const checks = computed(() => setup.data.value?.checks)
+const patientWindow = computed(() => {
+  if (!rules.value) return undefined
+  const { scheduleDays, patientDays } = rules.value
+  if (!Number.isInteger(scheduleDays) || scheduleDays < 1 || scheduleDays > 90 ||
+      !Number.isInteger(patientDays) || patientDays < 1 || patientDays > Math.min(90, scheduleDays + 1)) return undefined
+  return patientDays
+})
+const readiness = useKnowledgeRead(signal => {
+  const days = step.value === 4 ? patientWindow.value : undefined
+  return days === undefined ? Promise.resolve(undefined) : readSetupChecks(days, signal)
+})
+const checks = computed(() => readiness.state.value === 'ready' ? readiness.data.value : undefined)
 const prepared = computed(() => !!checks.value?.departments && !!checks.value?.doctors && !!checks.value?.schedules)
 const active = computed(() => !!setup.data.value?.profile.activatedAt)
 
@@ -181,14 +192,21 @@ function activate() {
       <section v-else class="catalog-editor" aria-labelledby="activate-title">
         <h2 id="activate-title">检查与启用</h2>
         <p>{{ profile.name || '待填写医院名称' }} · {{ profile.contact || '待填写门诊咨询电话' }}</p>
-        <ul>
-          <li>启用科室 {{ checks?.departments ?? 0 }} 个</li>
-          <li>启用医生 {{ checks?.doctors ?? 0 }} 位</li>
-          <li>有可用号源的开放排班 {{ checks?.schedules ?? 0 }} 场</li>
-        </ul>
         <p>可排到今天之后第 {{ rules.scheduleDays }} 天，患者可查询含当天的 {{ rules.patientDays }} 天。
           就诊前一天 {{ rules.cancellationCutoff }} 截止取消及改约，可提早 {{ rules.checkInLead }} 分钟签到。</p>
-        <p v-if="!prepared" class="admin-muted">请先导入资料，或在基础数据管理中添加科室、医生与排班。</p>
+        <p v-if="!patientWindow" class="admin-form-error" role="alert">请返回业务规则，填写有效的排班和患者查号范围。</p>
+        <p v-else-if="readiness.state.value === 'loading'" class="admin-muted" role="status">正在检查启用条件…</p>
+        <div v-else-if="!checks" class="admin-form-error" role="alert">启用条件检查失败。
+          <button class="admin-button" type="button" @click="readiness.reload">重试检查</button>
+        </div>
+        <template v-else>
+          <ul>
+            <li>启用科室 {{ checks.departments }} 个</li>
+            <li>启用医生 {{ checks.doctors }} 位</li>
+            <li>有可用号源的开放排班 {{ checks.schedules }} 场</li>
+          </ul>
+          <p v-if="!prepared" class="admin-muted">请先导入资料，或在基础数据管理中添加科室、医生与查号范围内的排班。</p>
+        </template>
         <button :disabled="busy || !prepared || !profile.name || !profile.contact" class="admin-button admin-button--primary"
           type="button" @click="activate">{{ active ? '保存并应用配置' : '确认启用' }}</button>
       </section>

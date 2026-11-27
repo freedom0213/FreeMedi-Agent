@@ -477,6 +477,8 @@ export interface CatalogImportPreview {
 }
 export const readHospitalSetup = async (signal?: AbortSignal) =>
   (await adminHttp.get<HospitalSetup>('/setup', { signal })).data
+export const readSetupChecks = async (patientDays: number, signal: AbortSignal) =>
+  (await adminHttp.get<HospitalSetup['checks']>('/setup/checks', { params: { patientDays }, signal })).data
 export const activateHospitalSetup = (settings: HospitalRules & { name: string; contact: string }) =>
   writeAgentSettings<HospitalSetup>('put', '/setup/activate', settings)
 export const previewCatalogImport = (kind: ImportKind, csv: string) =>

@@ -8,6 +8,7 @@ import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 
 import javax.sql.DataSource;
@@ -119,7 +120,7 @@ public class SlotQueryService {
         if (value == null || value.isBlank()) {
             return null;
         }
-        String normalised = value.trim().toUpperCase();
+        String normalised = value.trim().toUpperCase(Locale.ROOT);
         normalised = switch (normalised) {
             case "上午", "早上" -> "MORNING";
             case "下午" -> "AFTERNOON";
